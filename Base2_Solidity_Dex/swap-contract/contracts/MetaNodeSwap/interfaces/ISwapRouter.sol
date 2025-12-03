@@ -14,13 +14,13 @@ interface ISwapRouter is ISwapCallback {
     );
 
     struct ExactInputParams {
-        address tokenIn;
-        address tokenOut;
-        uint32[] indexPath;
+        address tokenIn;    //交易的起始代币
+        address tokenOut;   //交易的结束代币
+        uint32[] indexPath; // 交易需要经过的池子费率索引序列（用于多跳或拆分交易）。
         address recipient;
         uint256 deadline;
-        uint256 amountIn;
-        uint256 amountOutMinimum;
+        uint256 amountIn; // 用户想要精确投入的代币数量。这是交易的起点。
+        uint256 amountOutMinimum; // 用户愿意接受的最低输出数量（用于滑点保护）。
         uint160 sqrtPriceLimitX96;
     }
 

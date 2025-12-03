@@ -28,15 +28,25 @@ contract SwapRouter is ISwapRouter {
         }
         return abi.decode(reason, (int256, int256));
     }
-
+    /**
+     * Swap (交换) 是指将一种代币兑换成另一种代币的操作。
+     * 安全地调用底层流动性池（Pool）的 swap 方法，并处理其结果或错误
+     * @param pool 
+     * @param recipient 
+     * @param zeroForOne 
+     * @param amountSpecified 
+     * @param sqrtPriceLimitX96 
+     * @param data 
+     */
     function swapInPool(
-        IPool pool,
-        address recipient,
-        bool zeroForOne,
-        int256 amountSpecified,
-        uint160 sqrtPriceLimitX96,
-        bytes calldata data
+        IPool pool, // 目标 Pool 合约的实例接口
+        address recipient, // 接收输出代币的地址。
+        bool zeroForOne, // 交易方向 (true 用 Token0 换 Token1，false 反之)
+        int256 amountSpecified, // 交易数量（正数代表输入量，负数代表输出量）。
+        uint160 sqrtPriceLimitX96, // 价格限制（用于滑点控制或限价单）
+        bytes calldata data // 编码给 swapCallback 的回调数据（包含支付方等信息）
     ) external returns (int256 amount0, int256 amount1) {
+        // 交易结束后 Token0和 Token1的净变化量（遵循正流入/负流出约定）。
         try
             pool.swap(
                 recipient,
@@ -51,14 +61,25 @@ contract SwapRouter is ISwapRouter {
             return parseRevertReason(reason);
         }
     }
-
+    /**
+     * 进行实际的提币操作
+     * 这个函数用于执行一种标准的代币交换操作：用户指定精确的输入代币数量，合约计算并返回实际可以获得的输出代币数量。
+     * 用户指定要投入的 amountIn，Router 负责将这笔资金按 indexPath 确定的路径，分配到各个流动性池进行交换，并返回最终获得的 amountOut
+     * @param params 
+     */
     function exactInput(
         ExactInputParams calldata params
     ) external payable override returns (uint256 amountOut) {
         // 记录确定的输入 token 的 amount
+        // 记录用户原始的输入数量。在多跳交易中，这个变量会不断更新，表示剩余待交换的输入量。
         uint256 amountIn = params.amountIn;
 
         // 根据 tokenIn 和 tokenOut 的大小关系，确定是从 token0 到 token1 还是从 token1 到 token0
+        // 如果 tokenIn 是 token0，则 zeroForOne 为 true
+        //  如果 tokenIn 是 token1，则 zeroForOne 为 false
+        // 这是 Uniswap V3 的惯例。根据代币地址的大小关系 (params.tokenIn < params.tokenOut) 确定本次交易的方向。
+        // zeroForOne = true: 用户用 token0 换 token1, (tokenIn=token0, tokenOut=token1)
+        // zeroForOne = false: 用户用 token1 换 token0, (tokenIn=token1, tokenOut=token0)
         bool zeroForOne = params.tokenIn < params.tokenOut;
 
         // 遍历指定的每一个 pool
@@ -76,6 +97,7 @@ contract SwapRouter is ISwapRouter {
             IPool pool = IPool(poolAddress);
 
             // 构造 swapCallback 函数需要的参数
+            // data 会在 Pool 调用 Router 的 swapCallback 时被解码，告诉 Router 应该从哪里拉取代币
             bytes memory data = abi.encode(
                 params.tokenIn,
                 params.tokenOut,
@@ -84,16 +106,18 @@ contract SwapRouter is ISwapRouter {
             );
 
             // 调用 pool 的 swap 函数，进行交换，并拿到返回的 token0 和 token1 的数量
+            // 这个池子可以拿amount0换amount1个。更精确的说法是正的 amount：表示该代币数量流入池子。负的 amount：表示该代币数量流出池子
             (int256 amount0, int256 amount1) = this.swapInPool(
                 pool,
-                params.recipient,
+                params.recipient, // 接收输出代币的地址。
                 zeroForOne,
-                int256(amountIn),
-                params.sqrtPriceLimitX96,
+                int256(amountIn), // 交易数量（正数代表输入量，负数代表输出量）。
+                params.sqrtPriceLimitX96, // 价格限制（用于滑点控制或限价单）
                 data
             );
-
+            // amount0 和 amount1 的值来自 Pool，表示 Pool 在这次 swap 中实际吃掉的代币数量
             // 更新 amountIn 和 amountOut
+            // 在 pool.swap() 中，返回值 (amount0, amount1) 有着严格的符号约定.正数（> 0）： 表示该代币流入 Pool 合约（Pool 收到）。负数（< 0）： 表示该代币流出 Pool 合约（Pool 支出）。
             amountIn -= uint256(zeroForOne ? amount0 : amount1);
             amountOut += uint256(zeroForOne ? -amount1 : -amount0);
 
@@ -103,6 +127,7 @@ contract SwapRouter is ISwapRouter {
             }
         }
 
+        // 滑点检查： 检查最终累积的 amountOut 是否满足用户设定的最低要求（amountOutMinimum）。这是 “确定输入量交易” 中的关键安全保护。
         // 如果交换到的 amountOut 小于指定的最少数量 amountOutMinimum，则抛出错误
         require(amountOut >= params.amountOutMinimum, "Slippage exceeded");
 
@@ -112,7 +137,9 @@ contract SwapRouter is ISwapRouter {
         // 返回 amountOut
         return amountOut;
     }
-
+    /**
+     * @param params 
+     */
     function exactOutput(
         ExactOutputParams calldata params
     ) external payable override returns (uint256 amountIn) {
@@ -137,6 +164,7 @@ contract SwapRouter is ISwapRouter {
             IPool pool = IPool(poolAddress);
 
             // 构造 swapCallback 函数需要的参数
+            
             bytes memory data = abi.encode(
                 params.tokenIn,
                 params.tokenOut,
@@ -155,6 +183,7 @@ contract SwapRouter is ISwapRouter {
             );
 
             // 更新 amountOut 和 amountIn
+            // 这是多跳交易的关键部分。在每一步交换完成后，Router 需要更新 amountIn 和 amountOut 的累积值
             amountOut -= uint256(zeroForOne ? -amount1 : -amount0);
             amountIn += uint256(zeroForOne ? amount0 : amount1);
 

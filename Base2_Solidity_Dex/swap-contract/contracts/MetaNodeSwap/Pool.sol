@@ -297,13 +297,19 @@ contract Pool is IPool {
         uint256 feeAmount;
     }
 
+    /**
+     * 
+     * 执行实际代币交换、价格计算、费用累积和代币转移的核心函数
+     * 
+     **/
     function swap(
         address recipient,
         bool zeroForOne,
-        int256 amountSpecified,
+        int256 amountSpecified, // 交易数量（正数代表输入量，负数代表输出量）。
         uint160 sqrtPriceLimitX96,
         bytes calldata data
     ) external override returns (int256 amount0, int256 amount1) {
+        // 确保交易量不为零
         require(amountSpecified != 0, "AS");
 
         // zeroForOne: 如果从 token0 交换 token1 则为 true，从 token1 交换 token0 则为 false
@@ -320,6 +326,7 @@ contract Pool is IPool {
         // amountSpecified 大于 0 代表用户指定了 token0 的数量，小于 0 代表用户指定了 token1 的数量
         bool exactInput = amountSpecified > 0;
 
+        // 初始化一个内存结构体，用于存储交易过程中的动态状态（例如剩余交易量、累计的输入/输出量、当前价格、累计费用）。
         SwapState memory state = SwapState({
             amountSpecifiedRemaining: amountSpecified,
             amountCalculated: 0,
@@ -336,11 +343,18 @@ contract Pool is IPool {
         uint160 sqrtPriceX96Lower = TickMath.getSqrtPriceAtTick(tickLower);
         uint160 sqrtPriceX96Upper = TickMath.getSqrtPriceAtTick(tickUpper);
         // 计算用户交易价格的限制，如果是 zeroForOne 是 true，说明用户会换入 token0，会压低 token0 的价格（也就是池子的价格），所以要限制最低价格不能超过 sqrtPriceX96Lower
+        // 如果是 token0 -> token1，价格会下跌，最低不能低于 tickLower
+        // 如果是 token1 -> token0，价格会上涨，最高不能高于 tickUpper
         uint160 sqrtPriceX96PoolLimit = zeroForOne
             ? sqrtPriceX96Lower
             : sqrtPriceX96Upper;
 
         // 计算交易的具体数值
+        // 这是 Uniswap V3 模型的核心数学运算。它根据当前的流动性 (liquidity) 和剩余的交易量 (amountSpecified)，计算出：
+        // 交易后的新价格 (state.sqrtPriceX96)。
+        // 实际投入的代币量 (state.amountIn)。
+        // 实际产出的代币量 (state.amountOut)。
+        // 本次交易产生的手续费 (state.feeAmount)。
         (
             state.sqrtPriceX96,
             state.amountIn,
@@ -365,6 +379,7 @@ contract Pool is IPool {
         tick = TickMath.getTickAtSqrtPrice(state.sqrtPriceX96);
 
         // 计算手续费
+        // 计算出本次交易产生的费率增长，并将其累加到对应的全局手续费累积器 (feeGrowthGlobal*X128) 中。这是 LP 赚取手续费的记账依据。
         state.feeGrowthGlobalX128 += FullMath.mulDiv(
             state.feeAmount,
             FixedPoint128.Q128,
