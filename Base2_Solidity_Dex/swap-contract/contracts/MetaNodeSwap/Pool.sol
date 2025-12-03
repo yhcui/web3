@@ -314,6 +314,10 @@ contract Pool is IPool {
 
         // zeroForOne: 如果从 token0 交换 token1 则为 true，从 token1 交换 token0 则为 false
         // 判断当前价格是否满足交易的条件
+        // P = token1 / token0
+        // P衡量的是：购买 1 个 Token0 需要多少个Token1
+        // zeroForOne = true 投入 Token0，取出 Token1,价格P下跌.由于交易会使价格下跌，用户的限制价格必须低于当前价格。如果限制价格等于或高于当前价格，则表示限制已经被当前价格超越，交易应回滚。
+        // zeroForOne = false 投入 Token1，取出 Token0,价格P上涨.由于交易会使价格上涨，用户的限制价格必须高于当前价格。如果限制价格等于或低于当前价格，则表示限制已经被当前价格超越，交易应回滚。
         require(
             zeroForOne
                 ? sqrtPriceLimitX96 < sqrtPriceX96 &&
@@ -342,6 +346,7 @@ contract Pool is IPool {
         // 计算交易的上下限，基于 tick 计算价格
         uint160 sqrtPriceX96Lower = TickMath.getSqrtPriceAtTick(tickLower);
         uint160 sqrtPriceX96Upper = TickMath.getSqrtPriceAtTick(tickUpper);
+
         // 计算用户交易价格的限制，如果是 zeroForOne 是 true，说明用户会换入 token0，会压低 token0 的价格（也就是池子的价格），所以要限制最低价格不能超过 sqrtPriceX96Lower
         // 如果是 token0 -> token1，价格会下跌，最低不能低于 tickLower
         // 如果是 token1 -> token0，价格会上涨，最高不能高于 tickUpper
@@ -361,21 +366,22 @@ contract Pool is IPool {
             state.amountOut,
             state.feeAmount
         ) = SwapMath.computeSwapStep(
-            sqrtPriceX96,
+            sqrtPriceX96, // 当前价格。交易从这个价格点开始计算
             (
                 zeroForOne
                     ? sqrtPriceX96PoolLimit < sqrtPriceLimitX96
                     : sqrtPriceX96PoolLimit > sqrtPriceLimitX96
             )
                 ? sqrtPriceLimitX96
-                : sqrtPriceX96PoolLimit,
-            liquidity,
-            amountSpecified,
-            fee
+                : sqrtPriceX96PoolLimit, // 目标价格。交易在这个价格点停止计算。
+            liquidity, // 当前流动性L。在当前价格区间内可用的流动性量。
+            amountSpecified, // 剩余交易量。用户希望输入或输出的代币数量。
+            fee // 交易费率。用于计算手续费。
         );
 
         // 更新新的价格
         sqrtPriceX96 = state.sqrtPriceX96;
+        // 根据交易完成后计算出的最新价格sqrtPriceX96，计算并更新池子当前的Tick 索引。
         tick = TickMath.getTickAtSqrtPrice(state.sqrtPriceX96);
 
         // 计算手续费
@@ -406,7 +412,7 @@ contract Pool is IPool {
                 (state.amountIn + state.feeAmount).toInt256()
             );
         }
-
+        // 根据交易方向 (zeroForOne) 和交易类型 (exactInput) 确定最终返回给 Router 的 amount0 和 amount1 值
         (amount0, amount1) = zeroForOne == exactInput
             ? (
                 amountSpecified - state.amountSpecifiedRemaining,
@@ -420,10 +426,13 @@ contract Pool is IPool {
         if (zeroForOne) {
             // callback 中需要给 Pool 转入 token
             uint256 balance0Before = balance0();
+            // 回调 Router (swapCallback)： Pool 调用 Router（msg.sender）的 swapCallback，要求 Router 将tokenIn转移到 Pool 中
             ISwapCallback(msg.sender).swapCallback(amount0, amount1, data);
+            // 检查 swapCallback 执行后，Pool 中 tokenIn 的余额是否确实增加了所需数量，防止无效输入攻击（Insufficient Input Attack）
             require(balance0Before.add(uint256(amount0)) <= balance0(), "IIA");
 
             // 转 Token 给用户
+            //  Pool 将计算出的tokenOut 转移给 recipient
             if (amount1 < 0)
                 TransferHelper.safeTransfer(
                     token1,

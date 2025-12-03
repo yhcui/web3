@@ -21,7 +21,7 @@ interface ISwapRouter is ISwapCallback {
         uint256 deadline;
         uint256 amountIn; // 用户想要精确投入的代币数量。这是交易的起点。
         uint256 amountOutMinimum; // 用户愿意接受的最低输出数量（用于滑点保护）。
-        uint160 sqrtPriceLimitX96;
+        uint160 sqrtPriceLimitX96; // sqrtPriceLimitX96 是一个由用户意愿（价格限制或滑点要求）驱动，但在链下经过数学转换后，最终传入智能合约的核心安全参数
     }
 
     function exactInput(

@@ -112,7 +112,7 @@ contract SwapRouter is ISwapRouter {
                 params.recipient, // 接收输出代币的地址。
                 zeroForOne,
                 int256(amountIn), // 交易数量（正数代表输入量，负数代表输出量）。
-                params.sqrtPriceLimitX96, // 价格限制（用于滑点控制或限价单）
+                params.sqrtPriceLimitX96, // 价格限制（用于滑点控制或限价单） sqrtPriceLimitX96 是一个由用户意愿（价格限制或滑点要求）驱动，但在链下经过数学转换后，最终传入智能合约的核心安全参数
                 data
             );
             // amount0 和 amount1 的值来自 Pool，表示 Pool 在这次 swap 中实际吃掉的代币数量
