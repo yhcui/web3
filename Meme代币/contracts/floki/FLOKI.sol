@@ -14,21 +14,27 @@ import "./treasury/ITreasuryHandler.sol";
  */
 contract FLOKI is IERC20, IGovernanceToken, Ownable {
     /// @dev Registry of user token balances.
+    // 存储每个地址的 代币余额。
     mapping(address => uint256) private _balances;
 
     /// @dev Registry of addresses users have given allowances to.
+    // 存储授权信息（owner 授权 spender 可支配的金额）。
     mapping(address => mapping(address => uint256)) private _allowances;
 
     /// @notice Registry of user delegates for governance.
+    // 存储每个地址的 投票委托人（delegator -> delegatee）
     mapping(address => address) public delegates;
 
     /// @notice Registry of nonces for vote delegation.
+    // 用于 delegateBySig 的 交易计数，防止重放攻击
     mapping(address => uint256) public nonces;
 
     /// @notice Registry of the number of balance checkpoints an account has.
+    // 存储每个地址的快照点数量
     mapping(address => uint32) public numCheckpoints;
 
     /// @notice Registry of balance checkpoints per account.
+    // 存储每个地址的历史投票快照点（区块号和投票数）
     mapping(address => mapping(uint32 => Checkpoint)) public checkpoints;
 
     /// @notice The EIP-712 typehash for the contract's domain.
@@ -40,9 +46,11 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
         keccak256("Delegation(address delegatee,uint256 nonce,uint256 expiry)");
 
     /// @notice The contract implementing tax calculations.
+    // 税费处理合约的接口实例。
     ITaxHandler public taxHandler;
 
     /// @notice The contract that performs treasury-related operations.
+    // 金库操作合约的接口实例。
     ITreasuryHandler public treasuryHandler;
 
     /// @notice Emitted when the tax handler contract is changed.
@@ -166,6 +174,7 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param amount The number of tokens to transfer to recipient.
      * @return True if the transfer succeeds, else an error is raised.
      */
+    // 包含安全检查: 检查授权金额是否足够，并在转账后减少授权余额（使用 unchecked 块进行安全的减法）
     function transferFrom(
         address sender,
         address recipient,
@@ -222,6 +231,7 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * own address.
      * @param delegatee Address to delegate votes to.
      */
+    // 允许调用者将自己的全部投票权委托给另一个地址 (delegatee)
     function delegate(address delegatee) external {
         return _delegate(msg.sender, delegatee);
     }
@@ -235,6 +245,7 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param r Half of the ECDSA signature pair.
      * @param s Half of the ECDSA signature pair.
      */
+    // 链下签名委托。允许用户在不发送交易的情况下，通过签名授权其他地址（如中继者）在链上提交委托交易
     function delegateBySig(
         address delegatee,
         uint256 nonce,
@@ -432,6 +443,7 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param to Address the tokens are moved to.
      * @param amount The number of tokens to transfer.
      */
+    // 代币的核心转账函数，集成了税费和治理逻辑
     function _transfer(
         address from,
         address to,
@@ -441,9 +453,10 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
         require(to != address(0), "FLOKI:_transfer:TO_ZERO: Cannot transfer to the zero address.");
         require(amount > 0, "FLOKI:_transfer:ZERO_AMOUNT: Transfer amount must be greater than zero.");
         require(amount <= _balances[from], "FLOKI:_transfer:INSUFFICIENT_BALANCE: Transfer amount exceeds balance.");
-
+        // 允许金库合约在转账前执行操作（例如检查转账冷却时间）
         treasuryHandler.beforeTransferHandler(from, to, amount);
 
+        //税费计算
         uint256 tax = taxHandler.getTax(from, to, amount);
         uint256 taxedAmount = amount - tax;
 
