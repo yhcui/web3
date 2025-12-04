@@ -31,6 +31,8 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
 
     /// @notice Registry of the number of balance checkpoints an account has.
     // 存储每个地址的快照点数量
+    // nCheckpoints（即 numCheckpoints[address]）可以理解为一个委托人地址（delegatee）成功调用 _writeCheckpoint 函数的次数，
+    // 而 _writeCheckpoint 是由 _moveDelegates 调用的。
     mapping(address => uint32) public numCheckpoints;
 
     /// @notice Registry of balance checkpoints per account.
@@ -175,6 +177,8 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @return True if the transfer succeeds, else an error is raised.
      */
     // 包含安全检查: 检查授权金额是否足够，并在转账后减少授权余额（使用 unchecked 块进行安全的减法）
+    // transferFrom 函数是 ERC-20 代币标准中专门用于 授权消费 机制的核心函数。
+    // 它的设计目的就是为了让被授权方（spender） 能够代替代币所有者（owner） 转移其代币
     function transferFrom(
         address sender,
         address recipient,
@@ -200,6 +204,7 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param addedValue The number of tokens to add to `spender`'s allowance.
      * @return True if the allowance is successfully increased, else an error is raised.
      */
+    // 安全地增加（或增加）一个被授权方（spender）可以代表代币所有者（调用者 msg.sender）花费的代币额度（allowance）
     function increaseAllowance(address spender, uint256 addedValue) external returns (bool) {
         _approve(_msgSender(), spender, _allowances[_msgSender()][spender] + addedValue);
 
@@ -212,12 +217,15 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param subtractedValue The number of tokens to remove from `spender`'s allowance.
      * @return True if the allowance is successfully decreased, else an error is raised.
      */
+    // 安全地减少一个被授权方（spender）可以代表代币所有者（调用者 msg.sender）花费的代币额度（allowance）
     function decreaseAllowance(address spender, uint256 subtractedValue) external returns (bool) {
         uint256 currentAllowance = _allowances[_msgSender()][spender];
         require(
             currentAllowance >= subtractedValue,
             "FLOKI:decreaseAllowance:ALLOWANCE_UNDERFLOW: Subtraction results in sub-zero allowance."
         );
+        // unchecked 块: 在 Solidity 0.8.0 及更高版本中，标准的算术操作（加、减、乘）默认会检查溢出/下溢。
+        // 但是，由于代码已经在第 2 步手动使用 require 进行了下溢检查，因此在这里使用 unchecked 块可以节省 Gas 费用，因为它告诉编译器不需要再进行一次内部检查。
         unchecked {
             _approve(_msgSender(), spender, currentAllowance - subtractedValue);
         }
@@ -246,11 +254,15 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param s Half of the ECDSA signature pair.
      */
     // 链下签名委托。允许用户在不发送交易的情况下，通过签名授权其他地址（如中继者）在链上提交委托交易
+    // 当说 delegateBySig “允许用户在不发送交易的情况下完成委托” 时，这里的“用户”特指代币的实际所有者（signatory，即投票权的主人）
+    // 传统委托 (delegate) 如果您直接调用 delegate(delegatee)：发送交易的人: 代币所有者（您自己）。成本: 您必须支付 Gas 费用。
+    // 签名委托 (delegateBySig):代币所有者（您）的动作是：链下签名
+    // 发送交易的人: 第三方中继者 (Relayer)。 中继者收到您的签名数据后，调用 delegateBySig 函数，并支付相应的 Gas 费用
     function delegateBySig(
-        address delegatee,
-        uint256 nonce,
-        uint256 expiry,
-        uint8 v,
+        address delegatee, // 投票权将委托给的目标地址。
+        uint256 nonce, // 交易计数器，用于防止签名被重复使用（重放攻击）
+        uint256 expiry, // 签名失效的时间戳
+        uint8 v, // 签名失效的时间戳
         bytes32 r,
         bytes32 s
     ) external {
@@ -275,13 +287,20 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param blockNumber The block number to get the vote balance at.
      * @return The number of votes the account had as of the given block.
      */
+    // 实现 历史投票快照查询 的核心逻辑。它允许任何人在不修改链上状态的情况下，查询某个地址在过去特定区块拥有的投票权重
+    // 检索 account 地址在指定的 blockNumber 时拥有的投票数。
     function getVotesAtBlock(address account, uint32 blockNumber) public view returns (uint224) {
+
+        // 检查 1: 拒绝查询未来的区块
         require(
             blockNumber < block.number,
             "FLOKI:getVotesAtBlock:FUTURE_BLOCK: Cannot get votes at a block in the future."
         );
 
+        //  检查 2: 如果该账户没有任何快照记录
+        // nCheckpoints 变量指的是一个特定地址（account）在链上记录的投票快照（Checkpoint）的总数量
         uint32 nCheckpoints = numCheckpoints[account];
+        // 无快照记录: 如果 numCheckpoints 为 0，说明该地址从未进行过转账或委托操作，其投票数自然为 0
         if (nCheckpoints == 0) {
             return 0;
         }
@@ -359,10 +378,13 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param to Representative to move delegates to.
      * @param amount Number of delegates to move.
      */
+    // 该函数在两个主要场景下被调用：
+    // 代币转账 (_transfer): 当代币从地址 A 转移到地址 B 时，这笔代币对应的投票权会从 A 的委托人 转移到 B 的委托人。
+    // 委托变更 (_delegate): 当用户将他们的投票权委托给一个新的地址时，他们的投票权会从旧的委托人转移到新的委托人。
     function _moveDelegates(
-        address from,
-        address to,
-        uint224 amount
+        address from, // 投票权转出方
+        address to, // 投票权转入方
+        uint224 amount // 发生转移的投票数量。
     ) private {
         // No need to update checkpoints if the votes don't actually move between different delegates. This can be the
         // case where tokens are transferred between two parties that have delegated their votes to the same address.
@@ -377,7 +399,9 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
         }
 
         if (from != address(0)) {
+            // 减少旧委托人的投票数
             uint32 fromRepNum = numCheckpoints[from];
+            // checkpoints[from][fromRepNum - 1].votes  获取当前委托人（from）在本次投票权变动发生之前的总投票数 
             uint224 fromRepOld = fromRepNum > 0 ? checkpoints[from][fromRepNum - 1].votes : 0;
             uint224 fromRepNew = fromRepOld - amount;
 
@@ -385,6 +409,7 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
         }
 
         if (to != address(0)) {
+            // 增加新委托人的投票数
             uint32 toRepNum = numCheckpoints[to];
             uint224 toRepOld = toRepNum > 0 ? checkpoints[to][toRepNum - 1].votes : 0;
             uint224 toRepNew = toRepOld + amount;
@@ -400,17 +425,20 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param oldVotes Number of votes prior to this checkpoint.
      * @param newVotes Number of votes `delegatee` now has.
      */
+    // 记录委托人（delegatee）在当前区块的最新总投票数，并维护快照数组的长度。
     function _writeCheckpoint(
-        address delegatee,
-        uint32 nCheckpoints,
+        address delegatee, // 投票数发生变化的委托人地址
+        uint32 nCheckpoints, // 传入时，是该地址当前已有的快照记录总数（即 numCheckpoints[delegatee] 的旧值）。
         uint224 oldVotes,
         uint224 newVotes
     ) private {
         uint32 blockNumber = uint32(block.number);
 
         if (nCheckpoints > 0 && checkpoints[delegatee][nCheckpoints - 1].blockNumber == blockNumber) {
+            // 覆盖最新快照（同一区块去重）
             checkpoints[delegatee][nCheckpoints - 1].votes = newVotes;
         } else {
+            // 新增快照记录
             checkpoints[delegatee][nCheckpoints] = Checkpoint(blockNumber, newVotes);
             numCheckpoints[delegatee] = nCheckpoints + 1;
         }
