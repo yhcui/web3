@@ -12,6 +12,42 @@ import "./treasury/ITreasuryHandler.sol";
  * @title Floki token contract
  * @dev The Floki token has modular systems for tax and treasury handler as well as governance capabilities.
  */
+/*
+代币经济学（ERC-20）、模块化税收（DeFi/AMM）、和 链上治理（DAO）
+FLOKI 合约的核心业务目标是创建一个具备可持续资金来源、可灵活升级、并由社区驱动的代币生态系统。
+支柱一：社区驱动的治理 (DAO)。这是 FLOKI 合约最复杂的业务逻辑，借鉴了 Compound/Uniswap 的治理模型。
+支柱二、模块化代币经济学与税收 (Taxation & Treasury)。FLOKI 不是一个简单的 ERC-20 代币，它通过税收机制为协议金库提供资金，并利用模块化设计支持复杂的 DeFi 业务
+支柱三：协议控制与转账钩子 (Transaction Hooks)。通过 ITreasuryHandler 接口，FLOKI 合约将自己嵌入到每一笔代币转账流程中，以便实现对交易行为的控制
+
+FLOKI 合约中当前的代码实现只完成了 DAO 系统的 输入端（投票权统计），而输出端（实际的治理行为）是完全缺失的。
+需要的缺失模块：
+1. 提案系统 (Proposal Management)。核心治理合约，负责管理提案的生命周期（创建、排队、取消、执行）。
+2. 时间锁与执行 (TimeLock & Execution)。一个特权合约，它负责接收通过投票的提案（调用），并在一个预定的延迟期（例如 48 小时）后执行它们。
+
+FLOKI 代币合约代码中，税收机制的作用和金库资金的具体用途都没有被直接体现.FLOKI 代币合约本身只负责收钱并存入金库地址，但它不负责花钱或定义资金用途
+
+
+在实际的加密项目中，由交易税收积累起来的金库资金通常用于以下几个核心业务领域：
+1. 协议开发与维护
+开发团队薪资: 支付给维护和升级协议智能合约、前端、后端基础设施的开发者。
+审计费用: 支付给第三方安全公司，用于审计智能合约，确保代码安全。
+
+2. 流动性与价格稳定
+流动性提供 (LP): 购买代币和配对资产（如 ETH 或稳定币），用于在去中心化交易所（DEX）中增加流动性，从而减少大额交易的滑点。
+回购与销毁 (Buyback & Burn): 从市场回购代币并销毁，减少总供应量，对代币价格产生通缩作用。
+
+3. 市场营销与生态扩展
+市场营销: 支付给广告、公关、社区活动和合作项目，以提高代币知名度和采用率。
+合作投资: 投资于生态系统内的新项目，促进生态繁荣。
+社区奖励/空投: 用于激励社区贡献者或进行空投活动。
+
+4. 治理执行
+在一个完整的 DAO 架构中，金库合约 (ITreasuryHandler 的实际实现) 必须包含允许 DAO 执行的函数，例如：
+function distributeFunds(address destination, uint256 amount) external onlyGovernor;
+function addLiquidity(uint256 amountA, uint256 amountB) external onlyGovernor;
+这些函数只有在通过社区投票后，才能由 治理合约（Governor） 触发执行。因此，金库资金的用途最终是由 FLOKI 的 DAO 投票决定的。
+
+*/
 contract FLOKI is IERC20, IGovernanceToken, Ownable {
     /// @dev Registry of user token balances.
     // 存储每个地址的 代币余额。
@@ -253,6 +289,7 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param r Half of the ECDSA signature pair.
      * @param s Half of the ECDSA signature pair.
      */
+    // delegateBySig 函数中实现 EIP-712 签名验证 的核心逻辑。它的目标是安全、可信地从链下签名数据中恢复出签名者的地址
     // 链下签名委托。允许用户在不发送交易的情况下，通过签名授权其他地址（如中继者）在链上提交委托交易
     // 当说 delegateBySig “允许用户在不发送交易的情况下完成委托” 时，这里的“用户”特指代币的实际所有者（signatory，即投票权的主人）
     // 传统委托 (delegate) 如果您直接调用 delegate(delegatee)：发送交易的人: 代币所有者（您自己）。成本: 您必须支付 Gas 费用。
@@ -262,16 +299,66 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
         address delegatee, // 投票权将委托给的目标地址。
         uint256 nonce, // 交易计数器，用于防止签名被重复使用（重放攻击）
         uint256 expiry, // 签名失效的时间戳
-        uint8 v, // 签名失效的时间戳
+        uint8 v, // 
         bytes32 r,
         bytes32 s
     ) external {
+        // EIP-712 签名验证逻辑详解。整个过程分为三个主要步骤：构建域分隔符、构建结构体哈希，以及将两者结合并恢复地址
+        // 构建 Domain Separator（域分隔符）
+        // 这是验证过程的上下文层，目的是将签名绑定到特定的合约和区块链，防止签名被恶意用于其他合约或网络（即防重放攻击）
+        // 将所有参数一起进行哈希，生成一个独一无二的 domainSeparator。如果任何一个参数不同（比如在不同的链上），则这个域分隔符就会不同，签名验证就会失败
         bytes32 domainSeparator = keccak256(
+            // DOMAIN_TYPEHASH: 这是一个固定的哈希值，代表 EIP-712 域的结构定义（EIP712Domain(string name,uint256 chainId,address verifyingContract)）
+            // keccak256(bytes(name())): 当前代币合约的名称（例如 "FLOKI"）的哈希值。
             abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name())), block.chainid, address(this))
         );
+        
+        // 验证过程的数据层，目的是对用户实际想要执行的操作细节进行结构化哈希
+        // DELEGATION_TYPEHASH: 代表用户正在执行的操作类型定义（Delegation(address delegatee,uint256 nonce,uint256 expiry)）
+        // delegatee: 用户想要委托投票权给谁。
+        // nonce: 用于防止签名被重复使用的计数器。
+        // expiry: 签名失效的时间戳
+        // 将操作数据和类型哈希一起进行哈希，生成 structHash，确保用户签署的就是这些特定的参数
         bytes32 structHash = keccak256(abi.encode(DELEGATION_TYPEHASH, delegatee, nonce, expiry));
+
+        // 计算 Digest 并恢复地址。这是最终的验证步骤，将上下文和数据结合起来，并利用内置的密码学函数恢复签名者的地址
+        // \x19\x01: 这是一个固定的 EIP-712 前缀，用于防止签名被用作以太坊原生交易哈希
+        // abi.encodePacked: 将前缀、domainSeparator 和 structHash 紧密地连接在一起，并进行最终的哈希。这个 digest 就是用户在链下用私钥签署的最终数据
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        // 输出签署该内容的原始以太坊地址（即 signatory）.
+        // signatory 成功恢复出一个非零地址，并且该地址是预期的代币所有者，则证明签名有效，且未被篡改
         address signatory = ecrecover(digest, v, r, s);
+
+        /*
+        Solidity 提供了多种编码方式，它们在如何处理数据填充（padding）和数据类型上有所不同。
+        abi.encode (Standard ABI)	
+        填充 (Padding)	是。所有数据类型（包括地址、整数、哈希）都会被填充到 32 字节（256 位）。
+        主要用途1. 外部函数调用 (Call Data)。2. 事件参数编码。3. EIP-712 结构体哈希。
+
+        abi.encodePacked (Packed Mode)
+        填充 (Padding)	否。数据会尽可能紧凑地连接在一起，没有 32 字节填充。
+        主要用途1. Keccak256 哈希输入 (如计算唯一 ID)。2. 构建 EIP-712 Digest。
+
+        使用 abi.encode (用于结构化数据哈希)。在构建 domainSeparator 和 structHash 时，使用的是 abi.encode
+        为什么使用 abi.encode？
+        1、EIP-712 规范要求：EIP-712 规范要求在对结构体进行哈希时，必须使用标准 ABI 编码。
+        2、消除歧义：标准 ABI 编码（32 字节填充）确保了即使不同的数据组合在一起，它们的编码结果也是唯一的，从而防止了哈希冲突或编码歧义。
+        3、结构体哈希的用途：确保签名的用户和验证的合约对结构体中的每个字段（如 delegatee、nonce、expiry）的类型和位置有明确、统一的理解。
+
+
+        使用 abi.encodePacked (用于最终摘要的紧凑连接)
+        在计算最终的 digest 时，使用的是 abi.encodePacked
+        为什么使用 abi.encodePacked？
+        1、EIP-712 规范要求：EIP-712 规范要求最终的签名摘要 (digest) 是由固定的前缀、domainSeparator 和 structHash 紧密连接后再哈希得到的。
+        2、效率与简洁：domainSeparator 和 structHash 本身已经是 32 字节的 bytes32 类型。使用 abi.encodePacked 可以直接将它们与 \x19\x01 这个字节序列无缝拼接，而不会引入额外的 32 字节填充或偏移量，从而生成规范要求的紧凑字节串
+
+        为什么需要进行 Encoding（编码）？
+        对数据进行编码和哈希处理，是保证区块链安全性和可验证性的核心机制：
+        数据的唯一表示：将复杂的结构化数据（地址、字符串、数字）转换成一个唯一的、不可逆的 32 字节哈希值。
+        数据完整性：在验证签名时，合约需要重建与用户签署时完全相同的原始数据。编码方法（无论是标准 ABI 还是 Packed）确保了链上和链下对数据的解释是一致的。
+        防止篡改：如果不对数据进行编码和哈希，用户签署的可能只是原始数据的一个子集。哈希确保了用户对整个数据结构负责
+
+        */
 
         require(signatory != address(0), "FLOKI:delegateBySig:INVALID_SIGNATURE: Received signature was invalid.");
         require(block.timestamp <= expiry, "FLOKI:delegateBySig:EXPIRED_SIGNATURE: Received signature has expired.");
@@ -362,7 +449,11 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
      * @param delegator Address from which to delegate votes for.
      * @param delegatee Address to delegate votes to.
      */
-    function _delegate(address delegator, address delegatee) private {
+    // 投票权委托（Delegation） 负责更改委托关系，并将委托人（delegator）所持有的全部代币对应的投票权，从当前的委托人移动到新的委托人
+    // 将一个地址的投票权永久地（直到再次委托）委托给另一个地址
+    // delegator:委托人（代币的实际所有者）。
+    // delegatee:。新的被委托人（接收投票权的地址）
+    function (address delegator, address delegatee) private {
         address currentDelegate = delegates[delegator];
         uint256 delegatorBalance = _balances[delegator];
         delegates[delegator] = delegatee;
