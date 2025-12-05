@@ -526,8 +526,10 @@ contract MetaNodeStake is
             // MetaNodeForPool:该池子在本次结算的区块间隔内，从总产出中分配到的 MetaNode 奖励总额
             uint256 MetaNodeForPool = (multiplier * pool_.poolWeight) /
                 totalPoolWeight;
+
             // 在当前奖励周期内，每质押 1 个 ST Token 应该增加多少 MetaNode 奖励，并将其累加到全局累计率 R上
-            
+            // MetaNodeForPool：这个变量代表的是在 pool_.lastRewardBlock 到 block.number 之间，新产生的 MetaNode 奖励中，分配给该池子的总数量。
+            // 它是一个全新的、尚未计入 accMetaNodePerST 的奖励量。是纯粹的增量，它本身不包含任何历史
             accMetaNodePerST =
                 accMetaNodePerST +
                 (MetaNodeForPool * (1 ether)) /
@@ -859,14 +861,19 @@ contract MetaNodeStake is
      * @param _pid       Id of the pool to be deposited to
      * @param _amount    Amount of staking tokens to be deposited
      */
+    // 执行存款的核心逻辑，它封装了奖励结算和所有状态更新步骤
+
     function _deposit(uint256 _pid, uint256 _amount) internal {
         Pool storage pool_ = pool[_pid];
         User storage user_ = user[_pid][msg.sender];
 
+        // 关键第一步。在修改任何状态之前，强制更新 全局累计率pool_.accMetaNodePerST 到当前区块的最新值。这确保了所有现有质押者都能公平地结算到本次操作前的奖励。
         updatePool(_pid);
 
+        // 用户在该池子中已经有质押代币,则必须结算他们自上次操作以来赚取的奖励。
         if (user_.stAmount > 0) {
             // uint256 accST = user_.stAmount.mulDiv(pool_.accMetaNodePerST, 1 ether);
+            // 计算用户当前的总理论收益 (Current Theoretical Reward)
             (bool success1, uint256 accST) = user_.stAmount.tryMul(
                 pool_.accMetaNodePerST
             );
@@ -874,12 +881,14 @@ contract MetaNodeStake is
             (success1, accST) = accST.tryDiv(1 ether);
             require(success1, "accST div 1 ether overflow");
 
+            // 计算新增收益 = 当前总理论收益 - 上次快照起点
             (bool success2, uint256 pendingMetaNode_) = accST.trySub(
                 user_.finishedMetaNode
             );
             require(success2, "accST sub finishedMetaNode overflow");
 
             if (pendingMetaNode_ > 0) {
+                // 将新增收益累加到用户的待领取余额中
                 (bool success3, uint256 _pendingMetaNode) = user_
                     .pendingMetaNode
                     .tryAdd(pendingMetaNode_);
@@ -888,12 +897,13 @@ contract MetaNodeStake is
             }
         }
 
+        // 更新用户质押量
         if (_amount > 0) {
             (bool success4, uint256 stAmount) = user_.stAmount.tryAdd(_amount);
             require(success4, "user stAmount overflow");
             user_.stAmount = stAmount;
         }
-
+        // 更新池子总质押量
         (bool success5, uint256 stTokenAmount) = pool_.stTokenAmount.tryAdd(
             _amount
         );
@@ -901,6 +911,7 @@ contract MetaNodeStake is
         pool_.stTokenAmount = stTokenAmount;
 
         // user_.finishedMetaNode = user_.stAmount.mulDiv(pool_.accMetaNodePerST, 1 ether);
+        // 重置奖励快照
         (bool success6, uint256 finishedMetaNode) = user_.stAmount.tryMul(
             pool_.accMetaNodePerST
         );
@@ -921,6 +932,8 @@ contract MetaNodeStake is
      * @param _amount    Amount of MetaNode to be transferred
      */
     function _safeMetaNodeTransfer(address _to, uint256 _amount) internal {
+        // 合约计算出的用户应得奖励 (_amount) 是一个理论值。
+        // 然而，如果奖励代币的发行方（Minter/Owner）没有及时将足够的 MetaNode 充值到质押合约中，那么合约的余额可能会低于用户应得的总额。
         uint256 MetaNodeBal = MetaNode.balanceOf(address(this));
 
         if (_amount > MetaNodeBal) {
@@ -936,6 +949,12 @@ contract MetaNodeStake is
      * @param _to        Address to get transferred ETH
      * @param _amount    Amount of ETH to be transferred
      */
+    // 安全地将以太币 (ETH) 从合约转账给用户
+    // 是在 Solidity 中向外部地址发送 ETH 的推荐方式（优于 transfer 和 send，因为它转发了所有剩余的 Gas）
+    // 在 Solidity 0.5.0 版本之前，transfer 是发送 ETH 的标准方式。它只转发 2300 Gas。设计者认为这足以覆盖外部账户接收 ETH 的开销
+    // 后来发现这是一个严重的安全缺陷，被称为 Gas Limit 陷阱 (Gas Limit Attack)：
+    // 目标是合约：如果接收 ETH 的目标地址是一个智能合约，并且这个合约的 receive() 或 fallback() 函数在执行时需要的 Gas 超过 2300（例如，它需要执行一些存储或逻辑操作），那么 transfer 就会因为 Gas 不足而失败 (revert)。
+    // 不可预测性：随着 EVM 升级和操作码 Gas 成本的变化，原本够用的 2300 Gas 可能变得不够用，导致旧合约的功能意外中断。
     function _safeETHTransfer(address _to, uint256 _amount) internal {
         (bool success, bytes memory data) = address(_to).call{value: _amount}(
             ""
