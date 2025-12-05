@@ -387,22 +387,30 @@ contract FLOKI is IERC20, IGovernanceToken, Ownable {
         //  检查 2: 如果该账户没有任何快照记录
         // nCheckpoints 变量指的是一个特定地址（account）在链上记录的投票快照（Checkpoint）的总数量
         uint32 nCheckpoints = numCheckpoints[account];
-        // 无快照记录: 如果 numCheckpoints 为 0，说明该地址从未进行过转账或委托操作，其投票数自然为 0
+        // 无快照记录: 如果 numCheckpoints 为 0，说明该地址从未进行过转账或委托操作，其投票数自然为 0.
+        // 返回
         if (nCheckpoints == 0) {
             return 0;
         }
 
         // First check most recent balance.
+        // 如果请求查询的区块号（blockNumber）晚于或等于最新快照记录的区块号，则直接返回最新记录的投票数，从而跳过复杂的二分查找过程。
+        // 为什么可以直接返回最新记录的投票数？ 一个地址的投票数，一旦被记录在某个快照点，就会保持不变，直到合约触发另一个事件并创建下一个快照
+        // 原则： 一个委托人地址的投票数，在创建新的快照之前，将一直保持不变。
         if (checkpoints[account][nCheckpoints - 1].blockNumber <= blockNumber) {
             return checkpoints[account][nCheckpoints - 1].votes;
         }
 
         // Next check implicit zero balance.
+        // 查询最早快照被创建时的区块号之前的投票数
         if (checkpoints[account][0].blockNumber > blockNumber) {
             return 0;
         }
 
+        // 只有当目标区块号 blockNumber介于该账户的第一个快照和最后一个快照的区块号之间时，才会执行上述二分查找代码
+
         // Perform binary search.
+        // 二分查询对应的区块
         uint32 lowerBound = 0;
         uint32 upperBound = nCheckpoints - 1;
         while (upperBound > lowerBound) {
