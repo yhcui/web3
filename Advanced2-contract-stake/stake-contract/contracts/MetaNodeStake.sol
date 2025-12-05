@@ -52,6 +52,22 @@ contract MetaNodeStake is
         // Accumulated MetaNodes per staking token of pool
         // 质押 1个ETH经过1个区块高度，能拿到 n 个MetaNode
         // accMetaNodePerST 的完整意思是 Accumulated MetaNode Per ST Token（每单位 ST Token 累计的 MetaNode 奖励）
+        // pool_.accMetaNodePerST 这个值（全局累计率）在正常的 MasterChef 质押合约中是单调递增的，它不会下降。
+        // pool_.accMetaNodePerST 代表着每质押 1 个 ST Token 累计应获得的 MetaNode 奖励总量。它的增长机制完全基于奖励的累积
+        /*
+        1. 增长机制回顾它的计算公式：
+        $$\text{新 } R = \text{旧 } R + \frac{\text{该池子获得的 MetaNode 总奖励} \times 10^{18}}{\text{池子总质押量}}$$
+        一、只要以下条件成立，就会增长：
+        1、有区块时间流逝：奖励系统仍在 startBlock 和 endBlock 之间运行。
+        2、有总奖励产生：getMultiplier 函数返回的值大于 0。
+        3、池子中有质押：pool_.stTokenAmount (总质押量) 大于 0。
+        每次用户与合约交互（如 deposit, unstake, claim）或管理员调用 setPoolWeight，都会触发 updatePool，计算这段时间流逝产生的奖励，然后将奖励增量累加到 accMetaNodePerST 上。由于是累加，所以它会持续增长。
+        二、 不会下降的原因
+        在标准的 MasterChef 模型中，没有任何机制会从 accMetaNodePerST 中减去数值：
+        1、用户提款：当用户提款 ST Token 时，他们的新快照 (finishedMetaNode) 会被重置，但 pool_.accMetaNodePerST 本身不会减少。
+        2、奖励领取：用户领取奖励时，合约只是将 accMetaNodePerST 作为一个参照物来计算差额，然后重置用户的个人快照，也不会减少 pool_.accMetaNodePerST。
+        3、惩罚机制：除非合约被设计了特殊的销毁或惩罚机制（例如，收取费用来减少总质押量，或者在极端情况下被管理员手动归零），否则这个值在逻辑上是不会倒退的。在正常的质押逻辑中，它永远是一个不断增长的奖励“里程表”。
+        */
         uint256 accMetaNodePerST;
         // Staking token amount
         // 质押的代币数量
@@ -802,6 +818,7 @@ contract MetaNodeStake is
      *
      * @param _pid       Id of the pool to be claimed from
      */
+    // 用户领取 MetaNode 奖励的核心入口点，它负责结算所有应得的奖励，将奖励代币转账给用户，并重置奖励计算起点
     function claim(
         uint256 _pid
     ) public whenNotPaused checkPid(_pid) whenNotClaimPaused {
@@ -810,16 +827,23 @@ contract MetaNodeStake is
 
         updatePool(_pid);
 
+        // pendingMetaNode_ 现在存储的是用户当前可以立即领取的全部 MetaNode 奖励总额
         uint256 pendingMetaNode_ = (user_.stAmount * pool_.accMetaNodePerST) /
             (1 ether) -
             user_.finishedMetaNode +
             user_.pendingMetaNode;
 
+        // 转账检查: 只有当总可领金额大于零时才执行转账。
         if (pendingMetaNode_ > 0) {
+            // 清理待领余额: 将用户的存储变量 user_.pendingMetaNode 清零。由于金额已准备转账，此余额不再需要存储在合约中。
             user_.pendingMetaNode = 0;
+            // 转账: 调用内部辅助函数 _safeMetaNodeTransfer，将总奖励代币 (pendingMetaNode_) 从合约地址转账到用户的钱包 (msg.sender)
             _safeMetaNodeTransfer(msg.sender, pendingMetaNode_);
         }
 
+        // 重置奖励快照 (MasterChef 核心)
+        // 目的: 这是防止重复领取的关键。在奖励转账完成后，用户的奖励计算起点 (finishedMetaNode) 必须被重置到最新状态。
+        // 用户下次调用 claim 时，计算将从这个新的、更高的值开始，确保只结算从本次转账后新赚取的奖励。
         user_.finishedMetaNode =
             (user_.stAmount * pool_.accMetaNodePerST) /
             (1 ether);
