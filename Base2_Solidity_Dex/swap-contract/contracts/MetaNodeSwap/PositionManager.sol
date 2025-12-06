@@ -13,6 +13,12 @@ import "./interfaces/IPositionManager.sol";
 import "./interfaces/IPool.sol";
 import "./interfaces/IPoolManager.sol";
 
+/*
+PoolManager 侧重于池子的创建和发现
+PositionManager 侧重于流动性头寸（即用户的 LP 份额）的管理
+PositionManager 是协议的用户接口和流动性头寸的管理中心。它的职责是允许用户安全、方便地管理他们的流动性份额，并领取收益
+流动性头寸 (Position):用户的 LP 份额，通常以 NFT（非同质化代币）的形式表示，每个 NFT 对应一个独特的 Token 对、费率、tickLower 和 tickUpper 组合。
+*/
 contract PositionManager is IPositionManager, ERC721 {
     // 保存 PoolManager 合约地址
     IPoolManager public poolManager;
