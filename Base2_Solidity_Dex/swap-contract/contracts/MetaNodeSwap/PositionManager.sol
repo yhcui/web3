@@ -24,6 +24,7 @@ contract PositionManager is IPositionManager, ERC721 {
     IPoolManager public poolManager;
 
     /// @dev The ID of the next token that will be minted. Skips 0
+    // 通常用于跟踪下一个可用的头寸 ID。头寸 ID 通常从 1 开始计数。
     uint176 private _nextId = 1;
 
     constructor(address _poolManger) ERC721("MetaNodeSwapPosition", "MNSP") {
@@ -34,6 +35,16 @@ contract PositionManager is IPositionManager, ERC721 {
     mapping(uint256 => PositionInfo) public positions;
 
     // 获取全部的 Position 信息
+    // 所有用户 的头寸，因为这些头寸都是由该合约集中管理的
+    /**
+    
+     在真实的区块链应用中，这种设计虽然功能上是可行的，但存在一些重要的实际问题：
+     Gas 限制： 随着头寸数量的增加，_nextId - 1 也会无限增加。在以太坊这样的链上，如果头寸数量过多，执行 getAllPositions() 函数可能会因为超出区块 Gas 限制而失败。
+     数据冗余： 通常不会在链上直接提供一个查询所有用户所有头寸的函数。更常见的做法是提供：
+     positions(uint256 tokenId)：查询特定 ID 的头寸。
+     链下索引： 依靠 The Graph 或其他链下索引服务来监听 Mint、Burn 等事件，然后在链下数据库中重建并查询所有头寸列表。 
+     
+    */
     function getAllPositions()
         external
         view
@@ -54,12 +65,12 @@ contract PositionManager is IPositionManager, ERC721 {
     function _blockTimestamp() internal view virtual returns (uint256) {
         return block.timestamp;
     }
-
+    //防止交易过期: checkDeadline 检查当前区块链时间 (block.timestamp) 是否小于或等于用户在交易参数中设定的 截止时间（deadline）
     modifier checkDeadline(uint256 deadline) {
         require(_blockTimestamp() <= deadline, "Transaction too old");
         _;
     }
-
+    // 允许用户创建（铸造）一个新的集中流动性头寸，并将其投入到指定的流动性池（Pool）中
     function mint(
         MintParams calldata params
     )
@@ -91,6 +102,7 @@ contract PositionManager is IPositionManager, ERC721 {
         uint160 sqrtRatioAX96 = TickMath.getSqrtPriceAtTick(pool.tickLower());
         uint160 sqrtRatioBX96 = TickMath.getSqrtPriceAtTick(pool.tickUpper());
 
+        // TODO CUIYUHUI
         liquidity = LiquidityAmounts.getLiquidityForAmounts(
             sqrtPriceX96,
             sqrtRatioAX96,
@@ -109,7 +121,8 @@ contract PositionManager is IPositionManager, ERC721 {
         );
 
         (amount0, amount1) = pool.mint(address(this), liquidity, data);
-
+        // 分配新的头寸 ID。
+        // 铸造 ERC-721 代币并分配给用户。
         _mint(params.recipient, (positionId = _nextId++));
 
         (
@@ -143,6 +156,10 @@ contract PositionManager is IPositionManager, ERC721 {
         _;
     }
 
+    // 移除（销毁）流动性头寸 - 让流动性提供者（LP）取回他们之前投入的本金资产
+    // 在这个特定的模型中，burn 负责移除流动性，而资产（本金和手续费）会被累加到头寸的应得余额中，等待单独的 collect 调用来提取。
+    // 在这个模型中，burn 只是一个 记账和状态变更 的操作，它负责将流动性从 Pool 中移除，并将本金和收益结算到 tokensOwed 字段。
+    // 它并不负责实际的 Token 转移。 Token 的实际提取（从Pool 转到用户地址）需要通过 collect 函数来完成。
     function burn(
         uint256 positionId
     )
@@ -163,9 +180,14 @@ contract PositionManager is IPositionManager, ERC721 {
             position.index
         );
         IPool pool = IPool(_pool);
+
+        // 调用 Pool 的 burn（移除流动性） 要求 Pool 移除该头寸的所有 liquidity。
+        // Pool 合约执行流动性移除计算，并返回该流动性对应的 本金数量：amount0 和 amount1。
+        //  在这一步，Token资产并没有被转回给用户，而是被转移到 PositionManager 在 Pool 中的可提取余额中
         (amount0, amount1) = pool.burn(_liquidity);
 
         // 计算这部分流动性产生的手续费
+        // 1. 获取 Pool 当前的费用增长快照
         (
             ,
             uint256 feeGrowthInside0LastX128,
@@ -174,14 +196,45 @@ contract PositionManager is IPositionManager, ERC721 {
 
         ) = pool.getPosition(address(this));
 
+        // position.feeGrowthInside0LastX128 (头寸存储状态) 不是实时变动的。它是一个历史快照
+        // position.feeGrowthInside0LastX128 就像一个时间戳或记账点，用于标记该 LP 上次结算收益时的 Tick 内部费用增长值。
+        /**
+         position.feeGrowthInside0LastX128 只在以下操作中被更新：mint (铸造/创建头寸)： 
+         首次创建时，它被设置为当前的 Pool 实时值，作为该头寸开始赚取费用的 起始点。
+         burn (移除流动性)： 在结算完所有应得收益后，它被更新为 burn 操作结束时的 Pool 实时值。
+         collect (领取收益)： 在结算完所有应得收益后，它被更新为 collect 操作结束时的 Pool实时值。
+
+         如何计算收益？
+         （利用差值）正是因为 position.feeGrowthInsideLastX128 是一个固定不变的快照，才能用于计算收益。
+         当 LP 想要结算时（例如在 burn 函数中）：
+         查询实时值： 合约调用 pool.getPosition(address(this)) 获取当前时刻的 feeGrowthInside... 实时值。
+         计算差额： 实时值 减去头寸中存储的 position.feeGrowthInsideLastX128。
+         结算： 这个差额代表了 P_Start 到 P_End 期间该 Tick 区域内产生的费用，将其乘以头寸的 liquidity 即可结算收益。
+
+         feeGrowthInside0LastX128 和 feeGrowthInside1LastX128，衡量的是 单位流动性（Unit of Liquidity） 赚取的费用增长量。
+         费用增长字段的意义（单位流动性收益率）feeGrowthInside...X128 字段记录的是：每 1 单位流动性 $L$ 积累了多少手续费
+         例如，如果feeGrowthInside增加了 100，这表示在这个时间段内，池子里的 每 1 单位 L 都赚了 100 份 Token0 的手续费（当然，这个 100 是经过 2^128 缩放的）
+         
+         为什么要乘以 liquidity？
+         （LP 份额）仅仅知道 单位 L 赚了多少钱 是不够的，还需要知道这个特定的头寸贡献了多少 L。
+         LP 的实际收益必须等于：单位 L 的收益率 X LP 贡献的 L 数量。
+
+         为什么是 position.liquidity，而不是总流动性？
+         在 CLMM 中，position.liquidity 是该 LP 头寸在特定 tick边界内贡献的 L 数量。
+         手续费计算系统正是通过乘以这个头寸的私有流动性 L，实现了将 全局费用增长 转化为 该 LP 的具体收益份额 的业务目标
+         
+
+         */
+        // 2. 累加本金和手续费到 tokensOwed
         position.tokensOwed0 +=
             uint128(amount0) +
             uint128(
+                // FullMath.mulDiv == a * b / c
                 FullMath.mulDiv(
                     feeGrowthInside0LastX128 -
-                        position.feeGrowthInside0LastX128,
-                    position.liquidity,
-                    FixedPoint128.Q128
+                        position.feeGrowthInside0LastX128, // a: 费用增长差额 (分子)
+                    position.liquidity,// b: 流动性数量 (分子)
+                    FixedPoint128.Q128 // c: 缩放因子 2^128 (分母)
                 )
             );
 
@@ -197,8 +250,10 @@ contract PositionManager is IPositionManager, ERC721 {
             );
 
         // 更新 position 的信息
+        // 更新快照： 更新 feeGrowthInside... 快照为本次结算时的值。即使 liquidity为 0，这个更新也是必要的，因为 LP 在collect 之前可能还有一些微小的尾部费用需要结算
         position.feeGrowthInside0LastX128 = feeGrowthInside0LastX128;
         position.feeGrowthInside1LastX128 = feeGrowthInside1LastX128;
+        // 清零流动性： 将 position.liquidity 设为 0，标志着该头寸的流动性已经被完全移除
         position.liquidity = 0;
     }
 
