@@ -60,7 +60,11 @@ contract Pool is IPool {
 
     // 用一个 mapping 来存放所有 Position 的信息
     mapping(address => Position) public positions;
-
+    // 一个用户 owner 可以拥有多个头寸 ID 的理解是正确的，这是在 PositionManager 合约层面实现的
+    // 在一个 Pool 合约下，一个 owner 地址只能对应一个聚合的头寸记录
+    // 
+    /**
+     */
     function getPosition(
         address owner
     )
@@ -93,12 +97,22 @@ contract Pool is IPool {
             msg.sender
         ).parameters();
     }
-
+// 首次设置池子的初始市场价格，这是任何交易或流动性注入发生之前必须完成的操作
+// 该函数接收一个参数 sqrtPriceX96_，这是一个 Q96 格式的开方价格
     function initialize(uint160 sqrtPriceX96_) external override {
+        // sqrtPriceX96 是Pool 的价格状态变量。在 Solidity 中，未初始化的 uint160 变量默认为 0。
+        // 确保只初始化一次
         require(sqrtPriceX96 == 0, "INITIALIZED");
         // 通过价格获取 tick，判断 tick 是否在 tickLower 和 tickUpper 之间
+        // 计算Tick并更新： 首先，使用TickMath$ 库将输入的开方价格 sqrtPriceX96 转换为对应的 tick 索引
+        // Tick 是 集中流动性（CLMM）模型中的一个量化价格点（Quantized Price Point）。它将连续的价格空间划分为离散的、等间隔的价格边界。
+        //tick 是一个整数索引（i），用于表示价格点 P，而价格 P 才是 1.0001 次方的结果
+        // 价格 P（以 Token1 / Token0计）由 tick 索引 i 决定，其公式是：P(i) = 1.0001^i
+        //  tick 是一个int24 整数。它可以是正数、负数或零。作用：tick 是价格 P 的 指数
+        // tick就是i
         tick = TickMath.getTickAtSqrtPrice(sqrtPriceX96_);
         require(
+            // tickLower 和 tickUpper 是在 Pool 合约的 constructor（构造函数）中初始化的：
             tick >= tickLower && tick < tickUpper,
             "sqrtPriceX96 should be within the range of [tickLower, tickUpper)"
         );
@@ -169,11 +183,15 @@ contract Pool is IPool {
     /// @dev Get the pool's balance of token0
     /// @dev This function is gas optimized to avoid a redundant extcodesize check in addition to the returndatasize
     /// check
+    // Pool 合约中一个标准的 获取代币余额 的辅助函数，但它使用了 staticcall 而不是常规的call来进行ERC20余额查询，这是一种 gas 优化的技术
     function balance0() private view returns (uint256) {
+        // token0.staticcall  这是函数的核心。它对token0 地址发起一个 外部调用
+        // staticcall 的优势： 它比普通的 call 或 delegatecall 更安全、通常也更省 Gas。它强制执行 只读 调用，确保被调用的外部合约（即 Token0合约）不能修改任何状态变量。
         (bool success, bytes memory data) = token0.staticcall(
             abi.encodeWithSelector(IERC20.balanceOf.selector, address(this))
         );
         require(success && data.length >= 32);
+        //  将 ERC20.balanceOf 返回的 bytes数据解码为 uint256 类型，这个数值就是 Pool 合约所持有的 Token0 余额
         return abi.decode(data, (uint256));
     }
 
@@ -188,6 +206,12 @@ contract Pool is IPool {
         return abi.decode(data, (uint256));
     }
 
+    
+/*
+mint 函数是 Pool合约中用于 增加流动性（Minting Liquidity） 的核心入口。
+它的作用是让流动性提供者（LP，通常是通过PositionManager合约间接进行）在一个Pool预设的 Pool 和 tickUpper边界内，注入相应数量的 Token0 和 Token1
+mint 函数负责：计算所需本金 -> 更新 LP 头寸状态 -> 接收本金代币 -> 提高 Pool 的总流动性。
+*/
     function mint(
         address recipient,
         uint128 amount,

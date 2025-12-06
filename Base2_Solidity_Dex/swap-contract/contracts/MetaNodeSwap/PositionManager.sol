@@ -222,8 +222,19 @@ contract PositionManager is IPositionManager, ERC721 {
          为什么是 position.liquidity，而不是总流动性？
          在 CLMM 中，position.liquidity 是该 LP 头寸在特定 tick边界内贡献的 L 数量。
          手续费计算系统正是通过乘以这个头寸的私有流动性 L，实现了将 全局费用增长 转化为 该 LP 的具体收益份额 的业务目标
-         
+         单个LP头寸的流动性与池子整体流动性关系
+         单个LP头寸的流动性是指单个流动性提供者（LP）为其设定价格区间tickLower 到 tickUpper贡献的流动性数量
+         池子整体流动性 是指在当前市场价格点上，所有 活跃（Active） 的 LP 头寸的 L的总和
+         池子整体流动性 不是常数。当交易价格跨越一个 Tick 边界时，一些 LP的头寸会激活（进入价格区间）或失活（离开价格区间），
+        
+        核心分配公式
+        当一笔交易发生时，产生的交易手续费会被分配给所有在该 Tick 区域内提供流动性的 LP。
+        您的头寸获得的收益份额Share确认公式为
+        Share = 你的LP/池子整体流动性 *总手续费
 
+        在智能合约层面，这个比例分配是通过 费用增长率（feeGrowth） 系统间接实现的，而不是每次交易都实时计算比例：
+        1、全局费用增长率 ： 每当池子收到一笔手续费时，合约会计算并更新 全局费用增长率（我们之前提到的 feeGrowth）。这个增长率记录了每 1 单位 L 在该 Tick区域内赚取了多少费用。
+         LP 收益=(最新 feeGrowth-上次 feeGrowth)x您的LLP
          */
         // 2. 累加本金和手续费到 tokensOwed
         position.tokensOwed0 +=
@@ -257,6 +268,8 @@ contract PositionManager is IPositionManager, ERC721 {
         position.liquidity = 0;
     }
 
+    // 提取流动性头寸所赚取的手续费和已移除的本金 的函数。
+    // 接收一个 positionId 和一个 recipient 地址，并将该头寸累积的所有应得资产（tokensOwed0 和 tokensOwed1）发送给接收方
     function collect(
         uint256 positionId,
         address recipient
@@ -268,6 +281,7 @@ contract PositionManager is IPositionManager, ERC721 {
     {
         // 通过 isAuthorizedForToken 检查 positionId 是否有权限
         // 调用 Pool 的方法给 LP 退流动性
+        // 获取头寸信息和 Pool 地址
         PositionInfo storage position = positions[positionId];
         address _pool = poolManager.getPool(
             position.token0,
@@ -275,10 +289,12 @@ contract PositionManager is IPositionManager, ERC721 {
             position.index
         );
         IPool pool = IPool(_pool);
+        // 资产转移
+        // Pool 合约将实际执行 Token 的转移，将 amount0和amount1 从 Pool 合约地址直接发送到recipient 地址
         (amount0, amount1) = pool.collect(
             recipient,
-            position.tokensOwed0,
-            position.tokensOwed1
+            position.tokensOwed0, // 提取 Token0 的数量
+            position.tokensOwed1  // 提取 Token1 的数量
         );
 
         // position 已经彻底没用了，销毁
@@ -286,10 +302,15 @@ contract PositionManager is IPositionManager, ERC721 {
         position.tokensOwed1 = 0;
 
         if (position.liquidity == 0) {
+            // Position NFT失去了其代表的资产价值，因此被 销毁
             _burn(positionId);
         }
     }
 
+    // 核心作用是：在 Pool 合约内部完成流动性计算后，接收 Pool 的调用，并负责将用户预先授权的代币资产从用户的钱包转入到 Pool 合约中
+    // 在 PositionManager.mint() 内部:
+    // (amount0, amount1) = pool.mint(address(this), liquidity, data);
+    // 在pool.mint的执行逻辑中，它会计算出铸造该liquidity所需的精确代币数量（amount0 和 amount1），然后它会立即调用PositionManager的mintCallback方法。
     function mintCallback(
         uint256 amount0,
         uint256 amount1,
