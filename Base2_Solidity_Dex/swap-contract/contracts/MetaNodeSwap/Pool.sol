@@ -126,13 +126,21 @@ contract Pool is IPool {
         // any change in liquidity
         int128 liquidityDelta;
     }
+/*
+_modifyPosition 执行以下关键操作：
+1、费用结算： 计算msg.sender自上次结算以来累积的手续费，并将其加到 tokensOwed0/1中（这是已结算的利润）。
+2、流动性更新： positions[msg.sender].liquidity 和 Pool 的全局 liquidity都将减去 amount。
+3、本金计算： 根据 CLMM 公式，计算出与被移除的liquidity 对应的 Token0/1 本金数量。由于liquidityDelta是负的，返回的 amount0Int 和 amount1Int 也是负值，代表应退还的本金。
 
+params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint 操作)。负值： 减少流动性 (Burn操作)。
+ */
     function _modifyPosition(
         ModifyPositionParams memory params
     ) private returns (int256 amount0, int256 amount1) {
         // 通过新增的流动性计算 amount0 和 amount1
         // 参考 UniswapV3 的代码
 
+    // 计算在 tickLower 和tickUpper区间内，当前的 sqrtPriceX96 下，增加或减少liquidityDelta需要多少 Token0 和 Token1
         amount0 = SqrtPriceMath.getAmount0Delta(
             sqrtPriceX96,
             TickMath.getSqrtPriceAtTick(tickUpper),
@@ -207,11 +215,11 @@ contract Pool is IPool {
     }
 
     
-/*
-mint 函数是 Pool合约中用于 增加流动性（Minting Liquidity） 的核心入口。
-它的作用是让流动性提供者（LP，通常是通过PositionManager合约间接进行）在一个Pool预设的 Pool 和 tickUpper边界内，注入相应数量的 Token0 和 Token1
-mint 函数负责：计算所需本金 -> 更新 LP 头寸状态 -> 接收本金代币 -> 提高 Pool 的总流动性。
-*/
+    /*
+    mint 函数是 Pool合约中用于 增加流动性（Minting Liquidity） 的核心入口。
+    它的作用是让流动性提供者（LP，通常是通过PositionManager合约间接进行）在一个Pool预设的 Pool 和 tickUpper边界内，注入相应数量的 Token0 和 Token1
+    mint 函数负责：计算所需本金 -> 更新 LP 头寸状态 -> 接收本金代币 -> 提高 Pool 的总流动性。
+    */
     function mint(
         address recipient,
         uint128 amount,
@@ -243,6 +251,15 @@ mint 函数负责：计算所需本金 -> 更新 LP 头寸状态 -> 接收本金
         emit Mint(msg.sender, recipient, amount, amount0, amount1);
     }
 
+    // 将LP结算到的手续费和移除流动性后应得的本金，从Pool合约转账到用户指定的接收地址。
+    /**
+     已计算完毕、已记入你的头寸账户position，并等待你通过collect函数领取的代币数量
+     它们主要存储在你的头寸结构体Position 的以下两个字段中：tokensOwed0、tokensOwed1
+     资产的来源和结算时机
+     1、手续费收入： Pool中发生的swap交易。每次调用 mint 或 burn时。
+     2、已移除的本金： 调用burn移除流动性L。调用burn时。
+     此处不影响流动性。
+     */
     function collect(
         address recipient,
         uint128 amount0Requested,
@@ -270,9 +287,18 @@ mint 函数负责：计算所需本金 -> 更新 LP 头寸状态 -> 接收本金
 
         emit Collect(msg.sender, recipient, amount0, amount1);
     }
-
+    //  移除流动性（Burning Liquidity） 的核心方法。
+    //  它的作用是让流动性提供者（LP）减少其 position.liquidity份额，并按比例计算和结算应退还的本金和所有累积的费用
+   /**
+    为什么amount是流动性？
+    position.liquidity 字段记录了你在Pool的 tickLower和 tickUpper范围内贡献的总份额。
+    这个份额是不变的，只有通过 mint 增加或通过 burn 减少。
+    L 的数量决定了你赚取手续费的比例，并决定了你解除流动性时能取回多少代币。
+    代币数量是可变的。Pool中Token0/1 余额是不断变化的，它受 价格 和 交易滑点 的影响。
+    用户不需要自己进行复杂的数学运算，而是由外部合约PositionManager）负责计算出应燃烧的 L数量
+    */ 
     function burn(
-        uint128 amount
+        uint128 amount // liquidityDelta
     ) external override returns (uint256 amount0, uint256 amount1) {
         require(amount > 0, "Burn amount must be greater than 0");
         require(
@@ -280,10 +306,12 @@ mint 函数负责：计算所需本金 -> 更新 LP 头寸状态 -> 接收本金
             "Burn amount exceeds liquidity"
         );
         // 修改 positions 中的信息
+        // 函数计算出与减少的流动性amount对应的应退还的Token0和 Token1 数量。
+        // 由于 liquidityDelta是负的，因此返回的amount0Int和amount1Int 也是负数，表示资产从Pool中流出
         (int256 amount0Int, int256 amount1Int) = _modifyPosition(
             ModifyPositionParams({
                 owner: msg.sender,
-                liquidityDelta: -int128(amount)
+                liquidityDelta: -int128(amount) // liquidityDelta 被转换为负数（-int128(amount)）传入 _modifyPosition
             })
         );
         // 获取燃烧后的 amount0 和 amount1
