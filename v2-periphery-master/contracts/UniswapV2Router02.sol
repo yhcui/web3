@@ -307,6 +307,12 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
         address to,
         uint deadline
     ) public virtual override ensure(deadline) returns (uint amountETH) {
+        // removeLiquidity 最终会调用 Uniswap V2 Pair 合约的 burn 函数。
+        // Pair 合约 burn 函数的作用： 
+        // 销毁流动性代币 (LP Tokens) 并将对应的储备资产（Token A 和 Token B，在这里是 token 和 WETH）转回给 Router 合约 (address(this))。
+        // 代码追踪： Pair 合约的 burn 函数内部会调用 ERC20 代币的 transfer 函
+        // 扣费发生在这里！ 如果 token0 (即你的 token) 是一个 Fee-on-Transfer 代币，
+        // 当 Pair 合约调用 IERC20(token).transfer(...) 时，代币合约内部的 transfer 函数就会自动扣除税/费，然后将剩余部分发送给 Router。
         (, amountETH) = removeLiquidity(
             token,
             WETH,
@@ -316,8 +322,16 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
             address(this),
             deadline
         );
+
         // 使用实际余额而不是计算值来转移代币
         TransferHelper.safeTransfer(token, to, IERC20(token).balanceOf(address(this)));
+
+        // 这行代码执行了以下操作：
+        // 它调用了 WETH 合约上的 withdraw 函数。
+        // 参数 amountETH 是用户从流动性池中移除 WETH 的数量。
+        // WETH 合约接收到这个指令后，会执行以下两个动作：
+        // 销毁 WETH： 销毁 Router 合约持有的 amountETH 数量的 $WETH$ 代币。
+        // 发送 ETH： 将对应数量的原生 ETH 发送给调用者（即 Router 合约自身，address(this)）。
         IWETH(WETH).withdraw(amountETH);
         TransferHelper.safeTransferETH(to, amountETH);
     }
