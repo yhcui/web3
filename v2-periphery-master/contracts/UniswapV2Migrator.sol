@@ -41,17 +41,27 @@ contract UniswapV2Migrator is IUniswapV2Migrator {
         external
         override
     {
+        /**
+         正确的资金流向：在 migrate 函数执行过程中：
+            1、用户的 V1 流动性被提取并发送到此合约
+            2、部分代币用于添加到 V2 流动性池
+            3、剩余代币通过 safeTransfer 直接返还给用户
+         */
         // 获取V1版本的交易所合约
         IUniswapV1Exchange exchangeV1 = IUniswapV1Exchange(factoryV1.getExchange(token));
         // 查询发送者在V1交易所中的流动性余额
         uint liquidityV1 = exchangeV1.balanceOf(msg.sender);
         // 将流动性从发送者转移至当前合约
+        // 用户需要先手动授权（approve）V1 交易所合约可以操作自己的流动性代币，这是在调用 migrate 函数之前由用户完成的操作
+        // 在调用 migrate 函数之前，用户必须手动授权（approve）V1 交易所合约可以操作他们的流动性代币。这是一个需要用户单独执行的前置交易操作。
+        // 前提条件：在调用 migrate 函数之前，用户必须手动授权（approve）V1 交易所合约可以操作他们的流动性代币。这是一个需要用户单独执行的前置交易操作。 
         require(exchangeV1.transferFrom(msg.sender, address(this), liquidityV1), 'TRANSFER_FROM_FAILED');
         // 移除V1版本的流动性，获得ETH和代币
         (uint amountETHV1, uint amountTokenV1) = exchangeV1.removeLiquidity(liquidityV1, 1, 1, uint(-1));
         // 授权路由器可以使用代币
         TransferHelper.safeApprove(token, address(router), amountTokenV1);
         // 在V2版本中添加流动性，使用ETH和代币创建交易对
+        
         (uint amountTokenV2, uint amountETHV2,) = router.addLiquidityETH{value: amountETHV1}(
             token,
             amountTokenV1,
@@ -60,9 +70,15 @@ contract UniswapV2Migrator is IUniswapV2Migrator {
             to,
             deadline
         );
+
+        /*
+         addLiquidityETH 函数的设计保证了只会完全使用 amountETHV1 或 amountTokenV1 中的一个约束条件
+         这意味着要么所有 ETH 被使用完（可能有代币剩余），要么所有代币被使用完（可能有 ETH 剩余）
+        */
         // 如果实际使用的代币少于提取的代币数量，则退还多余的代币给发送者
         if (amountTokenV1 > amountTokenV2) {
             TransferHelper.safeApprove(token, address(router), 0); // 成为良好的区块链公民，重置授权额度为0
+            // 这里的 safeTransfer 是将代币从 UniswapV2Migrator 合约直接转账给 msg.sender，而不是代表某个账户消费代币。这是普通的转账操作，不需要预先批准。
             TransferHelper.safeTransfer(token, msg.sender, amountTokenV1 - amountTokenV2);
         } else if (amountETHV1 > amountETHV2) {
             // addLiquidityETH保证会使用全部amountETHV1或amountTokenV1，因此这个else分支是安全的
