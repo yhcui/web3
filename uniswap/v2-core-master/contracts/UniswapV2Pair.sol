@@ -140,11 +140,17 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
 
     // 更新储备量，并在每个区块的第一次调用时更新价格累积值
     function _update(uint balance0, uint balance1, uint112 _reserve0, uint112 _reserve1) private {
+        // 校验传入余额不会溢出（require(balance0 <= uint112(-1) ...)）。
         require(balance0 <= uint112(-1) && balance1 <= uint112(-1), 'UniswapV2: OVERFLOW');
+        
         uint32 blockTimestamp = uint32(block.timestamp % 2**32);
+        // 计算 timeElapsed 
+        // timeElapsed 表示自上一次更新储备（blockTimestampLast）以来经过的秒数。合约用它把一段时间内的“即时价格”按时间加权累积到 priceCumulative，从而支持 TWAP（时间加权平均价）。
         uint32 timeElapsed = blockTimestamp - blockTimestampLast; // 溢出是预期行为
         if (timeElapsed > 0 && _reserve0 != 0 && _reserve1 != 0) {
             // * 永不溢出，+ 溢出是预期行为
+            // 如果 timeElapsed > 0 且旧储备非 0，则使用旧储备值计算并累加 price0CumulativeLast 和 price1CumulativeLast（用于 TWAP 计算）。
+            // 注意这里用的是旧的 _reserve0/_reserve1 来计算过去时间区间内的价格贡献。
             price0CumulativeLast += uint(UQ112x112.encode(_reserve1).uqdiv(_reserve0)) * timeElapsed;
             price1CumulativeLast += uint(UQ112x112.encode(_reserve0).uqdiv(_reserve1)) * timeElapsed;
         }
@@ -381,7 +387,20 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     }
 
     // 强制使储备量与余额匹配
+    /*
+    sync()：把实际余额写回储备并更新价格累积与时间戳。
+    任何人可调用；内部有重入锁保护。
+    不移动代币，仅修改会计数据；常用于修复余额/储备不一致或主动同步状态。
+    调用会影响 TWAP 累积值，使用时注意可能与后续交易的组合效应。
+    作用：把合约当前实际持有的两个代币余额（on-chain token balances）写入合约的“储备”状态（reserve0/reserve1），并在必要时更新价格累积值（TWAP 相关）和时间戳，从而使合约内部的会计记录与实际代币余额同步。
+    场景：当有人直接向 Pair 合约转账代币（没有走 mint/transferFrom 等逻辑）或其他原因导致余额与记录的储备量不一致时，调用 sync() 可以强制让记录与真实余额一致。
+    */
     function sync() external lock {
+        /*
+        IERC20(token0).balanceOf(address(this))：读取 token0 合约中当前 Pair 合约地址持有的 token0 实际余额（链上查询）。
+        IERC20(token1).balanceOf(address(this))：同上，读取 token1 的实际余额。
+        reserve0 / reserve1：当前合约内部记录的“储备量”（旧值），传入 _update 作为计算价格累积（TWAP）和时间差的参考值。
+        */
         _update(IERC20(token0).balanceOf(address(this)), IERC20(token1).balanceOf(address(this)), reserve0, reserve1);
     }
 }
