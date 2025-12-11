@@ -14,59 +14,87 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 pragma solidity =0.6.6;
+/*
+WETH9 合约是一个 Wrapped Ether (WETH) 的实现，它的主要作用是将以太币（ETH）包装成 ERC-20 兼容的代币。
+主要功能
+1、包装 ETH: 用户可以通过 deposit() 函数将以太币存入合约，获得等量的 WETH 代币
+2、解包装 ETH: 用户可以通过 withdraw() 函数将 WETH 代币兑换回等量的以太币
+3、ERC-20 兼容: 实现了标准的 ERC-20 代币接口，包括转账、授权和余额查询等功能
 
+核心机制
+1、存款机制: 当用户调用 deposit() 并发送 ETH 时，合约会增加用户在 balanceOf 中的 WETH 余额，并触发 Deposit 事件
+2、提款机制: 用户可以调用 withdraw() 将指定数量的 WETH 代币兑换为 ETH，合约会减少用户余额并通过 msg.sender.transfer() 发送 ETH
+3、代币转移: 支持标准的 ERC-20 转账功能，包括直接转账 (transfer) 和授权转账 (transferFrom)
+4、授权机制: 用户可以通过 approve() 授权其他地址代表自己使用一定数量的 WETH 代币
+这个合约使得原生 ETH 能够在去中心化交易所和其他 DeFi 应用中像标准 ERC-20 代币一样使用，解决了 ETH 在智能合约交互中的限制。
+*/
 contract WETH9 {
+    // 代币名称
     string public name     = "Wrapped Ether";
+    // 代币符号
     string public symbol   = "WETH";
+    // 代币精度
     uint8  public decimals = 18;
 
+    // 授权事件
     event  Approval(address indexed src, address indexed guy, uint wad);
+    // 转账事件
     event  Transfer(address indexed src, address indexed dst, uint wad);
+    // 存款事件
     event  Deposit(address indexed dst, uint wad);
+    // 提款事件
     event  Withdrawal(address indexed src, uint wad);
 
+    // 用户余额映射
     mapping (address => uint)                       public  balanceOf;
+    // 授权额度映射
     mapping (address => mapping (address => uint))  public  allowance;
 
-    // function() public payable {
-    //     deposit();
-    // }
+    // 存入ETH并铸造相应数量的WETH
     function deposit() public payable {
         balanceOf[msg.sender] += msg.value;
         emit Deposit(msg.sender, msg.value);
     }
+    
+    // 提取指定数量的WETH并转回ETH
     function withdraw(uint wad) public {
-        require(balanceOf[msg.sender] >= wad, "");
+        require(balanceOf[msg.sender] >= wad, "余额不足");
         balanceOf[msg.sender] -= wad;
         msg.sender.transfer(wad);
         emit Withdrawal(msg.sender, wad);
     }
 
+    // 返回总供应量（即合约中的ETH余额）
     function totalSupply() public view returns (uint) {
         return address(this).balance;
     }
 
+    // 授权其他地址可以代表自己花费一定数量的代币
     function approve(address guy, uint wad) public returns (bool) {
         allowance[msg.sender][guy] = wad;
         emit Approval(msg.sender, guy, wad);
         return true;
     }
 
+    // 向指定地址转账
     function transfer(address dst, uint wad) public returns (bool) {
         return transferFrom(msg.sender, dst, wad);
     }
 
+    // 从一个地址向另一个地址转账（可为他人授权后操作）
     function transferFrom(address src, address dst, uint wad)
         public
         returns (bool)
     {
-        require(balanceOf[src] >= wad, "");
+        require(balanceOf[src] >= wad, "发送方余额不足");
 
+        // 如果不是自己操作且不是无限授权，则检查并减少授权额度
         if (src != msg.sender && allowance[src][msg.sender] != uint(-1)) {
-            require(allowance[src][msg.sender] >= wad, "");
+            require(allowance[src][msg.sender] >= wad, "授权额度不足");
             allowance[src][msg.sender] -= wad;
         }
 
+        // 执行转账操作
         balanceOf[src] -= wad;
         balanceOf[dst] += wad;
 
