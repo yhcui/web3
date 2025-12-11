@@ -155,18 +155,81 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     }
 
     // 如果手续费开启，则铸造相当于 sqrt(k) 增长六分之一的流动性
+    /*
+
+    在 mint 函数中，没有"扣你的钱再还给你"的过程。正确的流程是：
+
+        你先转账: 用户首先将代币转入 UniswapV2Pair 合约
+        合约检测: 合约通过比较当前余额和储备量来确定新增的代币数量
+        铸造LP代币: 根据你提供的流动性数量，为你铸造相应的LP代币
+        更新储备: 更新储备量以反映新的流动性
+
+    关于 _mintFee 函数，它是这样工作的：
+        当有交易发生时，交易费会增加流动性池的规模
+        协议会从这些增长中提取一部分作为费用
+        这部分费用以新铸造的LP代币形式发放给协议金库
+        这不是从你的流动性中扣除，而是从交易费积累中分配
+
+    流动性与代币数量的关系
+    在 UniswapV2Pair 中：
+
+    1、流动性确实代表代币数量
+
+    流动性池由两种代币组成：token0 和 token1
+    每个池都有对应的储备量：reserve0 和 reserve1
+    这些储备量就是实际存储在合约中的代币数量
+
+    2、流动性提供者的权益
+
+    当用户提供流动性时，他们会获得 LP 代币
+    LP 代币的数量与提供的代币价值成正比
+    用户可以通过燃烧 LP 代币来取回相应的代币份额
+
+    3、交易费用的影响
+
+    每笔交易都会向池中添加 0.3% 的费用
+    这些费用以代币形式增加到 reserve0 和 reserve1 中
+    因此池中实际代币数量会逐渐增加
+    
+    4、协议费用机制
+
+    协议费用是从交易费用导致的增长中提取的
+    不是直接从用户本金中扣除
+    而是从池子因交易费而增长的部分中分配
+    因此，流动性本质上就是池中持有的实际代币数量，而 LP 代币则是用户在池中所占份额的证明。    
+
+    */
     function _mintFee(uint112 _reserve0, uint112 _reserve1) private returns (bool feeOn) {
+        /*
+        
+        协议收入: 当 feeOn 为 true 时，协议可以从交易费中抽取一部分作为收入
+        流动性激励: 收取的费用以 LP 代币形式发放给协议指定的地址
+        治理控制: 通过工厂合约的 setFeeTo 方法可以开启或关闭此功能
+        */
         address feeTo = IUniswapV2Factory(factory).feeTo();
+        // 通过检查 feeTo 地址是否为非零地址来判断是否启用费用功能
         feeOn = feeTo != address(0);
-        uint _kLast = kLast; // 节省gas
+
+        // 计算和铸造协议费用
+        uint _kLast = kLast; // 节省gas -  将状态变量 kLast 加载到局部变量中，减少多次访问状态变量的Gas消耗。
         if (feeOn) {
             if (_kLast != 0) {
+                // rootK: 当前储备量乘积的平方根 (√(reserve0 × reserve1))
+                // rootKLast: 上次记录的 k 值的平方根 (√kLast)
+                // 只有当 rootK > rootKLast 时才产生费用（即流动性增加）
+                // 协议通过这部分增长收取费用 计算公式为： liquidity = (totalSupply × (rootK - rootKLast)) / (rootK × 5 + rootKLast)
                 uint rootK = Math.sqrt(uint(_reserve0).mul(_reserve1));
                 uint rootKLast = Math.sqrt(_kLast);
                 if (rootK > rootKLast) {
+                    // 这是 Uniswap V2 的协议费用计算公式：
+                    // 分子: totalSupply × (rootK - rootKLast)
+                    // 分母: rootK × 5 + rootKLast
+                    // 结果: 费用以 LP 代币形式发放给 feeTo 地址
                     uint numerator = totalSupply.mul(rootK.sub(rootKLast));
                     uint denominator = rootK.mul(5).add(rootKLast);
                     uint liquidity = numerator / denominator;
+
+                    // 只有当计算出的流动性大于0时，才会铸造 LP 代币给协议费用地址。
                     if (liquidity > 0) _mint(feeTo, liquidity);
                 }
             }
@@ -211,7 +274,7 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         在 swap 操作中，用户发送代币到合约
         在 mint 操作中，用户添加流动性时发送代币到合约
         差额部分：用户新增的流动性数量
-        
+
         */
         // 通过比较当前合约余额与储备量，得出用户新增的两种代币数量。
         // 这段代码的逻辑是用来计算当前交易对合约中新增的代币数量
