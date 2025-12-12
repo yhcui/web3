@@ -30,18 +30,127 @@ interface IUniswapV2Router02 {
     ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
 }
 
+// 简要说明：下面定义了与 Uniswap V2 相关的接口，合约通过这些接口
+// 与去中心化交易所路由和工厂进行交互（创建交易对、兑换、添加流动性等）。
+
 /**
  * @title ShibaMemeCoin
  * @dev SHIB风格的MEME代币合约，实现代币税、流动性池集成和交易限制功能
  */
+
+/*
+
+基于转账方向的识别是所有税费/反射型代币合约的通用机制。
+交易类型	    发送方 (from)	             接收方 (to)	            适用税率
+买入 (Buy)	    uniswapV2Pair (AMM 池)	    用户的钱包地址	            taxRates.buyTax
+卖出 (Sell)	    用户的钱包地址	             uniswapV2Pair (AMM 池)	    taxRates.sellTax
+转账 (Transfer)	钱包A	                    钱包 B	                    taxRates.transferTax
+一、“买入”（Buy）
+“买入”（Buy）这个操作，是从用户在去中心化交易所（DEX），如 Uniswap 或 SushiSwap 上进行交易时体现的，而非直接调用代币合约本身的方法
+在以太坊或 EVM 兼容链上的 DeFi 生态中，用户“买入”代币的完整链上流程如下：
+
+1. 外部操作：通过 DEX 路由
+用户在 DEX 界面上执行“用 ETH 换取 SMEME”的操作。DEX 的底层协议（如 Uniswap V2）会执行一个核心操作：与流动性池（Pair 合约）进行交互。
+
+2. 链上触发：AMM Pair 的 swap() 函数
+用户交易触发了 Uniswap V2 的 Pair 合约（即 uniswapV2Pair）中的 swap() 函数。这个 Pair 合约（流动性池）执行的动作是：
+    从用户的钱包中接收 ETH。
+    将池子中持有的 SMEME 代币，转账 给用户。
+
+3. 合约识别：_transfer 的触发
+正是这个 “将 SMEME 代币转账给用户” 的步骤，触发了 ShibaMemeCoin 合约的 ERC-20 核心函数：_transfer(address from, address to, uint256 amount)。
+    from 地址： 此时是 Uniswap 的 Pair 合约地址 (uniswapV2Pair)。
+    to 地址： 此时是买入代币的用户地址
+
+4. 业务逻辑：买入税的计算
+
+二、“卖出”（Sell）
+卖出与卖入相反。to 地址： 此时是 Uniswap 的Pair 合约地址 (uniswapV2Pair)。
+三、“转账”（Transfer）
+
+四、“其他”（Others）
+
+
+五、这个合约为什么只有添加流动性，没有移除流动性？
+这种类型的 Meme Coin 合约，其自动流动性机制 (_addLiquidity) 将获得的 LP Token（流动性提供者代币）发送给了项目方控制的地址：liquidityWallet
+
+业务逻辑：确保流动性安全
+    目的： 如果合约内提供了移除流动性的函数，并且这些流动性是由项目方钱包持有的，那么项目方可以直接调用合约来“撤池”（Rug Pull），拿走池子里的 ETH 和代币。
+    安全保障： 通过不提供移除流动性的功能，并由外部项目方钱包持有 LP Token，项目方可以向社区承诺（或通过锁定 LP Token 的方式），这些自动添加的流动性是永久性的，不会被轻易撤走。
+
+如何移除流动性？
+    由于 LP Token 被发送到了 liquidityWallet，只有持有该钱包私钥的人，才能通过直接与 Uniswap Router 合约交互来移除这部分流动性。 这不是代币合约本身的功能。
+
+ 用户如何移除流动性？
+如果是用户手动通过传统方式添加的流动性（非合约自动添加），那么他们会收到 LP Token。
+移除方式： 用户必须直接前往 Uniswap 或其他 DEX 的界面，使用他们钱包中持有的 LP Token，调用 Uniswap Router 合约的 removeLiquidityETH 或其他相关方法来撤回他们的资金。
+
+唯一的“移除”相关的函数
+    在合约中，唯一与资金撤出相关的函数是紧急提款函数，但它们不是移除流动性：
+    emergencyWithdrawETH(): 提取合约地址中积累的游离 ETH（通常是 Uniswap 交换代币后留下的）。
+    emergencyWithdrawTokens(address tokenAddress): 提取合约地址中意外或错误发送的其他 ERC-20 代币。
+    这两个函数都无法触及或移除 Uniswap 流动性池中的资产。
+
+六、凭将 LP Token 发送到 liquidityWallet 这一行为，并不能保证流动性是安全的。为什么项目方依然这样做？以及如何实现安全目的？
+1. 方便后续的流动性锁定（Liquidity Locking）
+   仅仅将 LP Token 放入一个钱包地址，项目方随时都可以用私钥来提取。为了实现“永久性”流动性的目的，项目方必须执行一个额外的、至关重要的步骤：锁定流动性。
+机制	            描述	                                                                                   安全性
+转移 LP Token	    将 liquidityWallet 中持有的 LP Token 转移到 时间锁定智能合约 中（如 PinkLock、UniCrypt 等）。	高：一旦锁定，即使项目方也无法在预定时间（例如 1 年或 5 年）到期前提取流动性。
+发送到销毁地址	     将 liquidityWallet 中持有的 LP Token 转移到 销毁地址 (0x...dEaD)。	                          最高：LP Token 被永久销毁，流动性被永远锁定在池子中，不可撤回。
+2. 为什么不直接在合约内锁定？
+技术上，合约可以将 LP Token 直接发送给时间锁定合约，但实际操作中通常需要 liquidityWallet 作为中转：
+    灵活性： 预留 liquidityWallet 可以让项目方灵活选择使用哪种锁定服务（不同的锁定合约有不同的地址和功能）。
+    初始控制： 在项目启动的极短时间内，可能需要 liquidityWallet 临时控制 LP Token，以便在正式锁定前进行必要的调整或启动仪式。
+
+
+*/
 contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     using SafeMath for uint256;
 
+    // 说明：使用 SafeMath 可避免在算术运算时发生溢出（尽管从0.8.x开始Solidity自带检查）。
+
     // 基础参数配置
+    // MAX_SUPPLY: 代币最大（初始）发行量（带18位小数，单位为最小代币单位）
     uint256 private constant MAX_SUPPLY = 1_000_000_000_000_000 * 10**18; // 1000万亿枚
+    // INITIAL_SUPPLY: 初始铸造数量（此处等于MAX_SUPPLY，全部铸给部署者）
     uint256 private constant INITIAL_SUPPLY = MAX_SUPPLY;
 
-    // 税费配置
+    // 税费配置（以基点计，10000 = 100%）
+    /*
+        反射奖励是指，当网络上发生代币交易（买入、卖出或转账）时，合约会自动将部分交易税费按比例分配给所有现有的代币持有者。
+        理论流程（反射机制的工作方式）：
+        用户 A 卖出 $SMEME$，触发 8% 的卖出税。
+        在 8% 的税费中，有 3% 的代币被标记为 reflectionFee。
+        合约会通过复杂的数学计算（通常使用 $r$ 余额/$t$ 余额模型，您合约中定义的 _rOwned 和 _tOwned 变量就是为此服务的），在执行转账时，悄悄减少所有地址的原始余额映射，同时增加一个公共的“累积奖励乘数”。
+        当您查看钱包余额时，合约会计算您的 $r$ 余额（反射余额）对应的 $t$ 余额（实际代币数量），这时您的余额会比上次查询时增加了反射奖励代币。
+
+        所有的交易税费（买入税、卖出税、转账税）在被收取时，收取的都是 $SMEME$ 代币，而不是 ETH。
+        ETH 只在 后续的分配阶段 才会被引入。
+        2、分配阶段：
+            代币 $\rightarrow$ ETH $\rightarrow$ 流动性/营销合约地址积累了足够的 $SMEME$ 代币（达到 swapThreshold）后，就会触发 _swapAndLiquify 流程，此时 $ETH$ 才会进入流程：
+            a、代币分配： 合约将积累的 $SMEME$ 代币按照 liquidityFee、marketingFee、burnFee 的比例进行分割。
+            b、销毁和预留： burnFee 部分被销毁；liquidityFee 的一半被预留（作为 $SMEME$ 代币部分）。
+            c、代币交换为 ETH： 剩余的 $SMEME$ 代币（用于营销和流动性的 $ETH$ 部分）被发送到 Uniswap Router，交换为 ETH。
+            d、ETH 分配： 交换所得的 $ETH$ 会被分成两部分：一部分用于和预留的 $SMEME$ 代币一起添加到流动性池。另一部分发送给 marketingWallet
+        
+        所有的费用都是以 $SMEME$ 代币的形式收取的。 
+        但是，在最终的分配阶段：营销费用 的份额会被转换为 $ETH$，然后发送给 marketingWallet。
+        其他费用（流动性、销毁、反射）则以 $SMEME$ 代币（或 $ETH$ 对应的流动性份额）的形式导向其目的地。
+
+        费用名称,   征收时的形态 (Phase I), 最终分配时的形态 (Phase II)
+        营销费用,   SMEME 代币,             ETH (发送给 marketingWallet)
+        流动性费用, SMEME 代币,             SMEME 代币 (一半) + ETH (一半) → LP Token
+        销毁费用,   SMEME 代币,             SMEME 代币 (发送给 deadAddress)
+        反射费用,   SMEME 代币,             SMEME 代币 (留在流通中，通过 r/t 机制分配)
+
+        LP Token 绝对不是指 ETH。
+        LP Token (Liquidity Provider Token) 是一种单独的 ERC-20 代币，代表您在流动性池中所占的份额。它是在您将 $SMEME$ 代币和 $ETH$ 投入池子后，由 Uniswap V2 Pair 合约铸造给您的凭证。
+            1、投入资产： 在 _addLiquidity 函数中，合约将 $SMEME$ 代币和 $ETH$ 同时发送给 Uniswap Router。
+            2、铸造 LP Token： Uniswap Router 接收 $SMEME$ 和 $ETH$，将它们放入流动性池中。作为回报，Uniswap Router 会铸造一个新的 LP Token，然后将这个 LP Token 发送到 liquidityWallet。
+            
+
+
+    */
     struct TaxRates {
         uint256 buyTax;          // 买入税费
         uint256 sellTax;         // 卖出税费
@@ -54,7 +163,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
     TaxRates public taxRates;
 
-    // 交易限制配置
+    // 交易限制配置（用于防刷、限制单笔交易量/最大持仓/交易频率等）
     struct TradingLimits {
         uint256 maxTransactionAmount;    // 最大交易量
         uint256 maxWalletAmount;         // 最大持有量
@@ -65,37 +174,53 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     TradingLimits public tradingLimits;
 
     // 地址配置
+    // marketingWallet: 接收营销费用的地址
+    // liquidityWallet: 添加流动性时接收LP或代币的地址（这里作为流动性接收者）
+    // deadAddress: 销毁代币的地址（通常使用烧毁地址）
     address public marketingWallet;
     address public liquidityWallet;
     address public deadAddress = 0x000000000000000000000000000000000000dEaD;
 
-    // Uniswap配置
+    // Uniswap 配置：路由合约地址和为本代币创建的交易对地址
     IUniswapV2Router02 public uniswapV2Router;
     address public uniswapV2Pair;
 
     // 状态变量
+    // tradingEnabled: 是否对所有用户开放交易（部署后可由 owner 打开）
+    // swapEnabled: 是否允许合约在交易中触发 swap & liquify
+    // inSwap: 互斥标志，防止重入或递归触发 swap
+    // swapThreshold: 合约代币余额达到该阈值时触发 swap/流动性操作
     bool public tradingEnabled = false;
     bool public swapEnabled = false;
     bool private inSwap = false;
     uint256 public swapThreshold;
 
-    // 映射
+    // 映射（状态映射）
+    // isExcludedFromFees: 标记哪些地址免收交易费（owner、合约自身等）
+    // isExcludedFromLimits: 标记哪些地址不受交易限制（如大额地址、合约等）
+    // automatedMarketMakerPairs: 标记哪些地址是自动化做市商（AMM）对，判断买/卖
+    // lastTransactionTime: 记录地址上一次交易时间（用于节流）
+    // isBlacklisted: 黑名单地址，禁止转入/转出
     mapping(address => bool) public isExcludedFromFees;
     mapping(address => bool) public isExcludedFromLimits;
     mapping(address => bool) public automatedMarketMakerPairs;
     mapping(address => uint256) public lastTransactionTime;
     mapping(address => bool) public isBlacklisted;
 
-    // 反射机制变量
+    // 反射（Reflection）机制变量（为了实现代币持有者分红/反射）
+    // MAX/_rTotal/_tTotal 等用于双重计数系统（反射代币常见实现）：
+    // - _tTotal 表示实际代币总量（token total）
+    // - _rTotal 表示反射单位总量（reflection total），用于将手续费按比例分配
     uint256 private constant MAX = ~uint256(0);
     uint256 private _tTotal = INITIAL_SUPPLY;
     uint256 private _rTotal = (MAX - (MAX % _tTotal));
+    // _rOwned/_tOwned: 记录地址的反射量和实际代币量（当地址被排除反射时使用）
     mapping(address => uint256) private _rOwned;
     mapping(address => uint256) private _tOwned;
     mapping(address => bool) private _isExcludedFromReward;
     address[] private _excludedFromReward;
 
-    // 事件定义
+    // 事件定义（用于链上监听状态变更）
     event TradingEnabled(bool enabled);
     event SwapAndLiquify(uint256 tokensSwapped, uint256 ethReceived, uint256 tokensIntoLiqudity);
     event TaxRatesUpdated(TaxRates newRates);
@@ -113,21 +238,23 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         inSwap = false;
     }
 
+    // modifier lockTheSwap: 在执行 swapAndLiquify 时设置互斥标志，防止重入。
+
     constructor(
         address _marketingWallet,
         address _liquidityWallet,
         address _router
     ) ERC20("ShibaMemeCoin", "SMEME") {
-        // 初始化钱包地址
+        // 初始化钱包地址（部署时由部署者传入）
         marketingWallet = _marketingWallet;
         liquidityWallet = _liquidityWallet;
 
-        // 初始化Uniswap路由
+        // 初始化 Uniswap 路由与交易对（创建本代币/WETH 交易对）
         uniswapV2Router = IUniswapV2Router02(_router);
         uniswapV2Pair = IUniswapV2Factory(uniswapV2Router.factory())
             .createPair(address(this), uniswapV2Router.WETH());
 
-        // 设置自动化做市商对
+        // 将主交易对标记为自动化做市商对（用于在转账中区分买/卖）
         _setAutomatedMarketMakerPair(uniswapV2Pair, true);
 
         // 初始化税费配置（基础税率，单位：基点，10000 = 100%）
@@ -141,7 +268,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
             marketingFee: 400    // 4% 营销费用
         });
 
-        // 初始化交易限制
+        // 初始化交易限制（可在部署后由 owner 调整）
         tradingLimits = TradingLimits({
             maxTransactionAmount: INITIAL_SUPPLY.mul(1).div(100),  // 1% 最大交易量
             maxWalletAmount: INITIAL_SUPPLY.mul(2).div(100),       // 2% 最大持有量
@@ -149,10 +276,11 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
             limitsInEffect: true
         });
 
-        // 设置交换阈值
+        // 设置合约触发 swap 的阈值（当合约自身代币余额 >= swapThreshold 时会触发）
+        // 这里设为初始供应的 0.05%
         swapThreshold = INITIAL_SUPPLY.mul(5).div(10000); // 0.05%
 
-        // 免除费用和限制
+        // 将一些特殊地址设为免收手续费与不受限制（例如 owner、合约自身、营销/流动性地址、销毁地址）
         isExcludedFromFees[owner()] = true;
         isExcludedFromFees[address(this)] = true;
         isExcludedFromFees[marketingWallet] = true;
@@ -165,7 +293,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         isExcludedFromLimits[liquidityWallet] = true;
         isExcludedFromLimits[deadAddress] = true;
 
-        // 初始化反射机制
+        // 初始化反射分配：将全部反射单位分配给 owner（配合 _mint 一起工作）
         _rOwned[owner()] = _rTotal;
 
         // 铸造初始供应量给合约部署者
@@ -174,7 +302,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         emit Transfer(address(0), owner(), INITIAL_SUPPLY);
     }
 
-    // 接收ETH
+    // 接收 ETH：合约可以直接接收 ETH（例如 swap 后的余额）
     receive() external payable {}
 
     /**
@@ -267,6 +395,18 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     /**
      * @dev 手动触发代币交换和流动性添加
      */
+    /*
+    用初始税率示例： 假设合约有 100 个代币余额，且税费比例为：
+        liquidityFee: 2%
+        marketingFee: 4%
+        burnFee: 1%
+        总费用 (TotalFees): 7%
+
+    在 _swapAndLiquify 中：
+        销毁： 约 14.3 个代币 (100 * 1/7) 被销毁。
+        流动性（LP）： 约 7.15 个代币 (100 * 2/7 / 2) 被预留作为代币的一半。
+        交换成 ETH： 剩下的代币（约 78.55 个）被交换成 ETH，用于营销和流动性的 ETH 部分。
+    */    
     function manualSwapAndLiquify() external onlyOwner {
         uint256 contractTokenBalance = balanceOf(address(this));
         require(contractTokenBalance > 0, "No tokens to swap");
@@ -304,17 +444,18 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         require(to != address(0), "Transfer to zero address");
         require(!isBlacklisted[from] && !isBlacklisted[to], "Blacklisted address");
 
-        // 检查交易是否启用
+        // 如果交易未启用，仅允许被免手续费的地址（通常 owner/合约）进行转账
         if (!tradingEnabled) {
             require(isExcludedFromFees[from] || isExcludedFromFees[to], "Trading not enabled");
         }
 
-        // 应用交易限制
+        // 应用交易限制（如最大交易量、最大钱包持有以及时间间隔限制）
         if (tradingLimits.limitsInEffect) {
             _applyTradingLimits(from, to, amount);
         }
 
-        // 执行代币交换和流动性添加
+        // 在满足条件时，合约会将自身持有的代币按比例 swap 为 ETH 并添加流动性、发送营销费
+        // 这个逻辑避免在 AMM 卖出时重复触发（仅在非 AMM 转账触发 swap）
         if (
             swapEnabled &&
             !inSwap &&
@@ -326,7 +467,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
             _swapAndLiquify(swapThreshold);
         }
 
-        // 计算税费
+        // 计算并收取税费（除在 swap 时或免手续费地址）
         bool takeFee = !inSwap;
         if (isExcludedFromFees[from] || isExcludedFromFees[to]) {
             takeFee = false;
@@ -382,7 +523,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         uint256 taxRate = 0;
 
         if (automatedMarketMakerPairs[from]) {
-            // 买入交易
+            // 交易时间间隔限制：当 target 是 AMM（即发起者在 AMM 卖出）时，检查卖方的时间间隔
             taxRate = taxRates.buyTax;
         } else if (automatedMarketMakerPairs[to]) {
             // 卖出交易
@@ -398,6 +539,10 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     /**
      * @dev 执行代币交换和流动性添加
      */
+    /*
+        swapAndLiquify 函数是分配代币的逻辑核心。
+        它会根据 taxRates 中设定的比例（liquidityFee、marketingFee 和 burnFee）来分割这笔 contractTokenBalance
+     */
     function _swapAndLiquify(uint256 contractTokenBalance) private lockTheSwap {
         // 计算各部分份额
         uint256 totalFees = taxRates.liquidityFee.add(taxRates.marketingFee).add(taxRates.burnFee);
@@ -410,11 +555,18 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
         // 销毁代币
         if (burnTokens > 0) {
+            //实际销毁代币
             super._transfer(address(this), deadAddress, burnTokens);
         }
 
         // 交换代币为ETH
+        /*
+        在 Solidity 和以太坊虚拟机（EVM）中，原生代币（$ETH$）和 $ERC-20$ 代币的存储和查询方式是完全不同的
+        原生代币（$ETH$）的余额是存储在 EVM 状态 中的，可以直接通过地址查询：
+        ERC-20 代币（例如 SMEME）的余额是存储在代币合约的 内部存储映射 中的，必须通过调用代币合约的 balanceOf() 函数来查询
+        */
         uint256 initialETHBalance = address(this).balance;
+        // 交换代币：从合约地址转账给 Uniswap Router
         _swapTokensForEth(swapTokens);
         uint256 newETHBalance = address(this).balance.sub(initialETHBalance);
 
@@ -423,6 +575,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         uint256 ethForMarketing = newETHBalance.sub(ethForLiquidity);
 
         // 添加流动性
+        / 添加流动性：从合约地址转账给 Uniswap Router
         if (liquidityTokens > 0 && ethForLiquidity > 0) {
             _addLiquidity(liquidityTokens, ethForLiquidity);
             emit SwapAndLiquify(liquidityTokens, ethForLiquidity, liquidityTokens);
@@ -430,6 +583,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
         // 发送营销费用
         if (ethForMarketing > 0) {
+            // 将营销费用发送给营销钱包
             payable(marketingWallet).transfer(ethForMarketing);
         }
     }
@@ -459,6 +613,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     function _addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
+        // 这行代码在内部触发了 super._transfer(address(this), address(uniswapV2Router), tokenAmount)
         uniswapV2Router.addLiquidityETH{value: ethAmount}(
             address(this),
             tokenAmount,
