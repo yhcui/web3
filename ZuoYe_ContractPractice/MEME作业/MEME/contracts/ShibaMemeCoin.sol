@@ -180,7 +180,14 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
             2、铸造 LP Token： Uniswap Router 接收 SMEME 和 ETH，将它们放入流动性池中。作为回报，Uniswap Router 会铸造一个新的 LP Token，然后将这个 LP Token 发送到 liquidityWallet。
             3、结果： liquidityWallet 最终持有的资产是：LP Token。这个 Token 代表它对 SMEME/ETH 流动性池的拥有权。
         LP Token 就像一个收据或证书，它代表着您在 SMEME/ETH 池子里所拥有的资产（ETH 和 SMEME）的份额。它本身不是 ETH
-            
+
+
+       两种截然不同的费率结构：
+        静态/传统税费： 流动性费、营销费、销毁费。
+        动态/反射奖励费： reflectionFee。     
+
+    如果使用了反射费： 总的扣费比例 Total Taker Fee 会包含 reflectionFee
+    Total Taker Fee = Liquidity Fee + Marketing Fee + Burn Fee + Reflection Fee
 
 
     */
@@ -212,6 +219,22 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     // deadAddress: 销毁代币的地址（通常使用烧毁地址）
     address public marketingWallet;
     address public liquidityWallet;
+
+    /*
+    一个非常著名且约定俗成的销毁地址，在整个以太坊和 EVM 兼容的区块链生态系统中，它被广泛用作“黑洞”地址
+    这个地址之所以成为通用的销毁地址，是因为它的设计目的是确保发送到该地址的代币永远无法被取出或使用，同时它又具有一个易于识别的后缀——dEaD
+    1. 密钥无法生成 (Unspendable Private Key)
+        代币的转移需要一个私钥来签署交易。
+        0x0000... 开头的地址通常被称为“零地址”或“空地址”。
+        这个地址，以及其他许多由一系列零和特殊字符组成的地址，是无法通过正常的密码学过程生成对应私钥的。
+        结果： 由于没有人拥有控制这个地址所需的私钥，任何发送到这个地址的代币都将永远被锁定，实现了永久销毁的目的。
+    2.易于识别和审计 (The "dEaD" Suffix)
+        销毁地址的目的是向社区证明代币已被移除流通。
+        0x0000...dEaD 的后缀是区块链社区为了方便识别和记忆而约定的。
+        结果： 当用户或审计员看到代币被发送到这个地址时，他们能立即理解这是用于销毁目的，提高了合约的透明度和可信度    
+    3.避免与其他地址冲突 (Safety and Standardization)
+        在早期的代币合约中，有些合约会使用 0x0000...0000 作为销毁地址。然而，这个地址在 EVM 中具有特殊的含义（例如，作为创建合约的默认发送方）。   
+    */
     address public deadAddress = 0x000000000000000000000000000000000000dEaD;
 
     // Uniswap 配置：路由合约地址和为本代币创建的交易对地址
@@ -220,24 +243,31 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
     // 状态变量
     // tradingEnabled: 是否对所有用户开放交易（部署后可由 owner 打开）
-    // swapEnabled: 是否允许合约在交易中触发 swap & liquify
-    // inSwap: 互斥标志，防止重入或递归触发 swap
-    // swapThreshold: 合约代币余额达到该阈值时触发 swap/流动性操作
     bool public tradingEnabled = false;
+
+    // swapEnabled: 是否允许合约在交易中触发 swap & liquify
     bool public swapEnabled = false;
+
+    // inSwap: 互斥标志，防止重入或递归触发 swap
     bool private inSwap = false;
+
+    // swapThreshold: 合约代币余额达到该阈值时触发 swap/流动性操作
     uint256 public swapThreshold;
 
     // 映射（状态映射）
     // isExcludedFromFees: 标记哪些地址免收交易费（owner、合约自身等）
-    // isExcludedFromLimits: 标记哪些地址不受交易限制（如大额地址、合约等）
-    // automatedMarketMakerPairs: 标记哪些地址是自动化做市商（AMM）对，判断买/卖
-    // lastTransactionTime: 记录地址上一次交易时间（用于节流）
-    // isBlacklisted: 黑名单地址，禁止转入/转出
     mapping(address => bool) public isExcludedFromFees;
+
+    // isExcludedFromLimits: 标记哪些地址不受交易限制（如大额地址、合约等）
     mapping(address => bool) public isExcludedFromLimits;
+
+    // automatedMarketMakerPairs: 标记哪些地址是自动化做市商（AMM）对，判断买/卖
     mapping(address => bool) public automatedMarketMakerPairs;
+
+    // lastTransactionTime: 记录地址上一次交易时间（用于节流）
     mapping(address => uint256) public lastTransactionTime;
+
+    // isBlacklisted: 黑名单地址，禁止转入/转出
     mapping(address => bool) public isBlacklisted;
 
     // 反射（Reflection）机制变量（为了实现代币持有者分红/反射）
@@ -247,6 +277,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     uint256 private constant MAX = ~uint256(0);
     uint256 private _tTotal = INITIAL_SUPPLY;
     uint256 private _rTotal = (MAX - (MAX % _tTotal));
+    
     // _rOwned/_tOwned: 记录地址的反射量和实际代币量（当地址被排除反射时使用）
     mapping(address => uint256) private _rOwned;
     mapping(address => uint256) private _tOwned;
@@ -495,7 +526,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
             !automatedMarketMakerPairs[from] &&
             !isExcludedFromFees[from] &&
             !isExcludedFromFees[to] &&
-            balanceOf(address(this)) >= swapThreshold
+            balanceOf(address(this)) >= swapThreshold // balanceOf(address(this)) 的钱不计算本次转账收取的费用。
         ) {
             _swapAndLiquify(swapThreshold);
         }
