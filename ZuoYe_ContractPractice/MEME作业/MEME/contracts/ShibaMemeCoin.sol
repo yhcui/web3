@@ -33,7 +33,7 @@ interface IUniswapV2Router02 {
         Router 会在内部调整逻辑，确保交易基于实际收到的数量来执行，从而成功完成代币交换。
 
     swapExactTokensForETHSupportingFeeOnTransferTokens 方法只是接收已经被扣除税费的代币。
-    
+
     */
     function swapExactTokensForETHSupportingFeeOnTransferTokens(
         uint amountIn, // 要发送的 SMEME 代币数量 (swapTokens) -- 已经被扣除税费
@@ -564,17 +564,31 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
      * @dev 执行代币交换和流动性添加
      */
     /*
+    
+    核心目的之一 就是将一部分累积的 SMEME 代币转换（Swap）成 ETH，以用于后续的流动性添加和营销费用分配
+
         swapAndLiquify 函数是分配代币的逻辑核心。
         它会根据 taxRates 中设定的比例（liquidityFee、marketingFee 和 burnFee）来分割这笔 contractTokenBalance
      */
     function _swapAndLiquify(uint256 contractTokenBalance) private lockTheSwap {
-        // 计算各部分份额
+        // 计算各部分税的总
         uint256 totalFees = taxRates.liquidityFee.add(taxRates.marketingFee).add(taxRates.burnFee);
         if (totalFees == 0) return;
 
+        //流动性
         uint256 liquidityTokens = contractTokenBalance.mul(taxRates.liquidityFee).div(totalFees).div(2);
+
+        // 营销 -- 其实最终也是转为ETH了
         uint256 marketingTokens = contractTokenBalance.mul(taxRates.marketingFee).div(totalFees);
+
+        // 销毁
         uint256 burnTokens = contractTokenBalance.mul(taxRates.burnFee).div(totalFees);
+
+        // 交换代币 == 总-流动-销毁
+        // 营销费用（marketingFee）的份额已经被包含在用于交换的 swapTokens。
+        // 如果不减去 liquidityTokens，那么全部的 contractTokenBalance 都会被包含在 swapTokens 中
+        // 会将全部代币卖出换成 ETH。合约就没有 SMEME 代币剩下，无法与 ETH 配对来添加流动性。
+        // 减去 liquidityTokens 的行为，在编程上等同于说：“将 liquidityTokens 数量的 SMEME 代币从待交换队列中排除，作为配对的资产预留在合约地址中。”
         uint256 swapTokens = contractTokenBalance.sub(liquidityTokens).sub(burnTokens);
 
         // 销毁代币
@@ -598,8 +612,36 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         uint256 ethForLiquidity = newETHBalance.mul(taxRates.liquidityFee).div(totalFees.sub(taxRates.burnFee)).div(2);
         uint256 ethForMarketing = newETHBalance.sub(ethForLiquidity);
 
-        // 添加流动性
-        / 添加流动性：从合约地址转账给 Uniswap Router
+        // 添加流动性：从合约地址转账给 Uniswap Router
+        /*
+            非常重要的逻辑
+            1、在最终添加流动性时，必须严格按照流动性池（Pair 合约）的实时价格比例来配对。
+            2、自动流动性机制中 $SMEME$ 代币和 $ETH$ 的数量是 先根据税率分配份额，然后 在最终添加流动性时， 使用 Uniswap Router 来保证满足 实际价格比例的。
+            这个过程分为“内部计算”（根据税率）和“外部执行”（根据市场价格）。
+            阶段一：内部计算（根据税率确定份额）$SMEME$ 合约首先根据自身设定的税率，确定需要为流动性（LP）准备多少 $SMEME$ 代币和多少 $ETH$ 的份额。
+                   确定 $SMEME$ 代币份额：这是由 liquidityFee 决定的。这部分代币（$50\%$ 的 liquidityFee 对应的 $SMEME$）是预留在合约中的。
+                   确定 $ETH$ 份额：这是由另一半 $50\%$ 的 liquidityFee 对应的 $SMEME$ 代币卖出后，转换成的 $ETH$ 决定的。
+                   在这个阶段，合约只保证 $SMEME$ 和 $ETH$ 在税费百分比上是等比例的，但并不能保证它们在实时市场价值上是等值的。
+            阶段二：外部执行（使用 Uniswap Router 保证价格）关键点： 
+                _addLiquidity 函数的调用必须依赖 Uniswap Router 来保证价格匹配。
+                当合约调用 uniswapV2Router.addLiquidityETH 时，它会传入它所能提供的 $SMEME$ 代币数量 (tokenAmount) 和它所能提供的 $ETH$ 数量 (ethAmount)。
+                为了确保配对成功，Uniswap Router 提供了两个关键参数：
+                    amountTokenMin：合约最低愿意投入的 $SMEME$ 代币数量。
+                    amountETHMin：合约最低愿意投入的 $ETH$ 数量。
+                在合约代码中，这两个参数都被设置为 0：    
+                当 amountTokenMin 和 amountETHMin 都设置为 0 时，Uniswap Router 的逻辑是：
+                1、它会以流动性池当前的实时价格为基准。
+                2、它将使用所有传入的 $SMEME$ 代币 (tokenAmount)。
+                3、然后，它会从传入的 $ETH$ 总量 (ethAmount) 中，只取走与 tokenAmount 价值完全等值的 $ETH$ 来进行配对。
+                4、如果传入的 ethAmount 大于所需值，多余的 $ETH$ 会被退还给合约地址。
+            实际价格说了算
+            即使 $SMEME$ 合约内部计算的 $SMEME$ 和 $ETH$ 数量因为市场波动而价值不等，只要：
+            1、合约有足够的 $ETH$（即 ethAmount 足够高）。
+            2、amountTokenMin 和 amountETHMin 设置为 $0$。
+            那么 Uniswap Router 就会：全部使用 $SMEME$ 代币，并只取等值的 $ETH$，从而保证配对比例严格符合流动性池的实际市场价格。
+
+            因此，实际价格 才是最终决定配对比例的因素，而税率只是决定了输入给 Uniswap Router 的资产总量。
+        */
         if (liquidityTokens > 0 && ethForLiquidity > 0) {
             _addLiquidity(liquidityTokens, ethForLiquidity);
             emit SwapAndLiquify(liquidityTokens, ethForLiquidity, liquidityTokens);
@@ -618,11 +660,11 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     /*
         业务步骤：谁在调用？ 
         1、ShibaMemeCoin 合约调用它自己，将累积的税费代币 (swapTokens) 卖出。
-        2、发生什么？ swapTokens 数量的 $SMEME$ 代币从合约地址转给 Uniswap Router。
-        3、税费收取： $SMEME$ 合约会收取转账税（因为这是合约地址到 Router 的转账，而不是标准的买入/卖出，但通常也需要交费）。
-        4、交换执行： Uniswap Router 基于实际收到的 $SMEME$ 代币，从流动性池中取出相应的 $ETH$。
-        5、ETH 接收： $ETH$ 被发送回 $SMEME$ 合约地址 (address(this))。
-        6、后续： $SMEME$ 合约现在有了 $ETH$，可以继续执行 _swapAndLiquify 的后续步骤：分配 $ETH$ 到营销钱包和添加到流动性池。
+        2、发生什么？ swapTokens 数量的 SMEME 代币从合约地址转给 Uniswap Router。
+        3、税费收取： SMEME 合约会收取转账税（因为这是合约地址到 Router 的转账，而不是标准的买入/卖出，但通常也需要交费）。
+        4、交换执行： Uniswap Router 基于实际收到的 SMEME 代币，从流动性池中取出相应的 ETH。
+        5、ETH 接收： ETH 被发送回 SMEME 合约地址 (address(this))。
+        6、后续： SMEME 合约现在有了 ETH，可以继续执行 _swapAndLiquify 的后续步骤：分配 ETH 到营销钱包和添加到流动性池。
     */
     function _swapTokensForEth(uint256 tokenAmount) private {
         // [SMEME 地址, WETH 地址]
