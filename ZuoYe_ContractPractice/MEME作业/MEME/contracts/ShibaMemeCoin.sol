@@ -5,13 +5,22 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
-
+// IUniswapV2Factory 是 “管理者” 和 “记录员”，负责创建和跟踪所有的交易对（流动性池）
 interface IUniswapV2Factory {
+    // 这里的TokenB是WETH,也就是交易对是代币和WETH,router中再进行WETH和ETH的转换
     function createPair(address tokenA, address tokenB) external returns (address pair);
 }
 
+// IUniswapV2Router02 是 “执行者” 和 “交易前台”，负责执行用户和合约发起的代币交换、流动性添加/移除等操作。
 interface IUniswapV2Router02 {
     function factory() external pure returns (address);
+    /*
+        ETH 是以太坊网络的原生货币，它不是一个标准的 ERC-20 代币，因此无法直接与遵循 ERC-20 标准的 SMEME 代币在 Uniswap V2 这样的 DEX 中配对交易。
+        MEME -> WETH -> ETH
+        路由器需要 WETH 地址来构建 Token -> ETH 的交换路径，即 [TokenAddress, WETHAddress]。
+        路由器必须调用 WETH 合约的 deposit() 和 withdraw() 函数来完成 ETH -> WETH 的自动包裹和解包。
+
+    */
     function WETH() external pure returns (address);
     /*
     这个方法的目的是允许用户或合约：
@@ -641,6 +650,18 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
             那么 Uniswap Router 就会：全部使用 $SMEME$ 代币，并只取等值的 $ETH$，从而保证配对比例严格符合流动性池的实际市场价格。
 
             因此，实际价格 才是最终决定配对比例的因素，而税率只是决定了输入给 Uniswap Router 的资产总量。
+
+            合约地址中多余的 $ETH$ 是如何处理的？
+            1. 盈余产生的原因 (ETH Overload)正如我们在上一个问题中讨论的，在 addLiquidityETH 调用中，合约通常会传入比实际需要量 更多 的 $ETH$。
+                传入 $ETH$： 由 _swapTokensForEth 转换所得的 $ETH$ 总量 (ethAmount)。
+                实际需要 $ETH$： 严格按照实时市场价格，与预留的 $SMEME$ 代币 (tokenAmount) 等值配对所需的 $ETH$ 数量。
+                由于 ethAmount 是根据税率比例计算出来的，它通常会高于配对所需的 $ETH$，尤其是在 $SMEME$ 代币价格下跌时。
+                Uniswap Router 的行为：在 addLiquidityETH 中，Uniswap Router 只会取走所需的 $ETH$ 进行配对，然后将未使用的 $ETH$ 退还给交易发起者，即 合约地址 (address(this))。
+            2. $ETH$ 盈余的去向这笔退还给合约地址的多余 $ETH$ 的最终处理，取决于合约代码的后续逻辑：
+                A. 归入营销钱包 (最可能的结果)
+                    在绝大多数情况下，您看到的多余 $ETH$ 会被打包到营销费用中，转给项目方控制的营销钱包
+                B. 留在合约地址 (零头或设计缺陷)
+                本合约就留在了合约中，可以调用emergencyWithdrawETH提取。
         */
         if (liquidityTokens > 0 && ethForLiquidity > 0) {
             _addLiquidity(liquidityTokens, ethForLiquidity);
@@ -674,6 +695,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
+        // $ShibaMemeCoin$ 合约通过在交易路径中指定 $WETH$ 地址，来确保其与路由器的 $ETH$ 功能顺利集成
         uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount,
             0,
