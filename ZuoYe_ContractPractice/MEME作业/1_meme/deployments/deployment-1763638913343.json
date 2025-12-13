@@ -1,0 +1,25 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "deployer": "0x042e30d946f82044de1BC3e63AF7f9Be03848065",
+  "timestamp": "2025-11-20T11:41:53.343Z",
+  "contracts": {
+    "token": "0xF200CA42c99B52Cd32C855830b55fe99337aa483",
+    "pair": "0xf85c8a66f844931a435CE8E83c88e6718E2706cF"
+  },
+  "config": {
+    "name": "shib meme",
+    "symbol": "ShibMM",
+    "totalSupply": "1000000000000000000000000000000",
+    "routerAddress": "0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008",
+    "marketingAddress": "0x042e30d946f82044de1bc3e63af7f9be03848065",
+    "devAddress": "0x042e30d946f82044de1bc3e63af7f9be03848065"
+  },
+  "initialSettings": {
+    "buyTax": "500",
+    "sellTax": "1000",
+    "maxTxAmount": "5000000000000000000000000000",
+    "maxWalletAmount": "20000000000000000000000000000",
+    "cooldownPeriod": "60"
+  }
+}

@@ -13,12 +13,34 @@ interface IUniswapV2Factory {
 interface IUniswapV2Router02 {
     function factory() external pure returns (address);
     function WETH() external pure returns (address);
+    /*
+    这个方法的目的是允许用户或合约：
+    1、出售 精确数量的 ERC-20 代币（在本例中是 SMEME）。
+    2、换取 另一种资产，最终目标是 ETH（或 WETH）。
+
+    部分名称,含义
+    swapExactTokens,意味着 发送的代币数量 是精确指定的 (amountIn)。
+    ForETH,意味着交易的最终输出是 原生 ETH。
+    SupportingFeeOnTransferTokens,意味着这个方法能够正确处理在转账过程中会被扣税的代币。
+
+    为什么需要这个特殊的方法？
+        对于大多数标准 ERC-20 代币，Uniswap V2 使用 swapExactTokensForETH。
+        然而，对于您的 SMEME 代币：合约打算发送 100 个 SMEME 代币去交换 ETH。
+        在转账 100 个代币给 Uniswap Pair 时，代币合约（SMEME）会收取 8\% 的卖出税。
+        结果： Uniswap Pair 实际只收到了 92 个代币。
+        如果使用标准方法，Uniswap 会基于接收 100 个代币的预期来计算价格和滑点，导致交易失败或价格不准确。
+        SupportingFeeOnTransferTokens 解决了这个问题： 它告诉 Uniswap Router，它预期接收的数量（100）和实际收到的数量（92）是不同的。
+        Router 会在内部调整逻辑，确保交易基于实际收到的数量来执行，从而成功完成代币交换。
+
+    swapExactTokensForETHSupportingFeeOnTransferTokens 方法只是接收已经被扣除税费的代币。
+    
+    */
     function swapExactTokensForETHSupportingFeeOnTransferTokens(
-        uint amountIn,
-        uint amountOutMin,
-        address[] calldata path,
-        address to,
-        uint deadline
+        uint amountIn, // 要发送的 SMEME 代币数量 (swapTokens) -- 已经被扣除税费
+        uint amountOutMin, // amountOutMin: 要求的最低 ETH 数量 (这里设为 0，因为是内部调用)
+        address[] calldata path, // [SMEME 地址, WETH 地址]
+        address to, // ETH 接收地址 (合约地址本身)
+        uint deadline // 交易截止时间
     ) external;
     function addLiquidityETH(
         address token,
@@ -119,23 +141,23 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     /*
         反射奖励是指，当网络上发生代币交易（买入、卖出或转账）时，合约会自动将部分交易税费按比例分配给所有现有的代币持有者。
         理论流程（反射机制的工作方式）：
-        用户 A 卖出 $SMEME$，触发 8% 的卖出税。
+        用户 A 卖出 SMEME，触发 8% 的卖出税。
         在 8% 的税费中，有 3% 的代币被标记为 reflectionFee。
-        合约会通过复杂的数学计算（通常使用 $r$ 余额/$t$ 余额模型，您合约中定义的 _rOwned 和 _tOwned 变量就是为此服务的），在执行转账时，悄悄减少所有地址的原始余额映射，同时增加一个公共的“累积奖励乘数”。
-        当您查看钱包余额时，合约会计算您的 $r$ 余额（反射余额）对应的 $t$ 余额（实际代币数量），这时您的余额会比上次查询时增加了反射奖励代币。
+        合约会通过复杂的数学计算（通常使用 r 余额/t 余额模型，您合约中定义的 _rOwned 和 _tOwned 变量就是为此服务的），在执行转账时，悄悄减少所有地址的原始余额映射，同时增加一个公共的“累积奖励乘数”。
+        当您查看钱包余额时，合约会计算您的 r 余额（反射余额）对应的 t 余额（实际代币数量），这时您的余额会比上次查询时增加了反射奖励代币。
 
-        所有的交易税费（买入税、卖出税、转账税）在被收取时，收取的都是 $SMEME$ 代币，而不是 ETH。
+        所有的交易税费（买入税、卖出税、转账税）在被收取时，收取的都是 SMEME 代币，而不是 ETH。
         ETH 只在 后续的分配阶段 才会被引入。
         2、分配阶段：
-            代币 $\rightarrow$ ETH $\rightarrow$ 流动性/营销合约地址积累了足够的 $SMEME$ 代币（达到 swapThreshold）后，就会触发 _swapAndLiquify 流程，此时 $ETH$ 才会进入流程：
-            a、代币分配： 合约将积累的 $SMEME$ 代币按照 liquidityFee、marketingFee、burnFee 的比例进行分割。
-            b、销毁和预留： burnFee 部分被销毁；liquidityFee 的一半被预留（作为 $SMEME$ 代币部分）。
-            c、代币交换为 ETH： 剩余的 $SMEME$ 代币（用于营销和流动性的 $ETH$ 部分）被发送到 Uniswap Router，交换为 ETH。
-            d、ETH 分配： 交换所得的 $ETH$ 会被分成两部分：一部分用于和预留的 $SMEME$ 代币一起添加到流动性池。另一部分发送给 marketingWallet
+            代币 \rightarrow ETH \rightarrow 流动性/营销合约地址积累了足够的 SMEME 代币（达到 swapThreshold）后，就会触发 _swapAndLiquify 流程，此时 ETH 才会进入流程：
+            a、代币分配： 合约将积累的 SMEME 代币按照 liquidityFee、marketingFee、burnFee 的比例进行分割。
+            b、销毁和预留： burnFee 部分被销毁；liquidityFee 的一半被预留（作为 SMEME 代币部分）。
+            c、代币交换为 ETH： 剩余的 SMEME 代币（用于营销和流动性的 ETH 部分）被发送到 Uniswap Router，交换为 ETH。
+            d、ETH 分配： 交换所得的 ETH 会被分成两部分：一部分用于和预留的 SMEME 代币一起添加到流动性池。另一部分发送给 marketingWallet
         
-        所有的费用都是以 $SMEME$ 代币的形式收取的。 
-        但是，在最终的分配阶段：营销费用 的份额会被转换为 $ETH$，然后发送给 marketingWallet。
-        其他费用（流动性、销毁、反射）则以 $SMEME$ 代币（或 $ETH$ 对应的流动性份额）的形式导向其目的地。
+        所有的费用都是以 SMEME 代币的形式收取的。 
+        但是，在最终的分配阶段：营销费用 的份额会被转换为 ETH，然后发送给 marketingWallet。
+        其他费用（流动性、销毁、反射）则以 SMEME 代币（或 ETH 对应的流动性份额）的形式导向其目的地。
 
         费用名称,   征收时的形态 (Phase I), 最终分配时的形态 (Phase II)
         营销费用,   SMEME 代币,             ETH (发送给 marketingWallet)
@@ -144,9 +166,11 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         反射费用,   SMEME 代币,             SMEME 代币 (留在流通中，通过 r/t 机制分配)
 
         LP Token 绝对不是指 ETH。
-        LP Token (Liquidity Provider Token) 是一种单独的 ERC-20 代币，代表您在流动性池中所占的份额。它是在您将 $SMEME$ 代币和 $ETH$ 投入池子后，由 Uniswap V2 Pair 合约铸造给您的凭证。
-            1、投入资产： 在 _addLiquidity 函数中，合约将 $SMEME$ 代币和 $ETH$ 同时发送给 Uniswap Router。
-            2、铸造 LP Token： Uniswap Router 接收 $SMEME$ 和 $ETH$，将它们放入流动性池中。作为回报，Uniswap Router 会铸造一个新的 LP Token，然后将这个 LP Token 发送到 liquidityWallet。
+        LP Token (Liquidity Provider Token) 是一种单独的 ERC-20 代币，代表您在流动性池中所占的份额。它是在您将 SMEME 代币和 ETH 投入池子后，由 Uniswap V2 Pair 合约铸造给您的凭证。
+            1、投入资产： 在 _addLiquidity 函数中，合约将 SMEME 代币和 ETH 同时发送给 Uniswap Router。
+            2、铸造 LP Token： Uniswap Router 接收 SMEME 和 ETH，将它们放入流动性池中。作为回报，Uniswap Router 会铸造一个新的 LP Token，然后将这个 LP Token 发送到 liquidityWallet。
+            3、结果： liquidityWallet 最终持有的资产是：LP Token。这个 Token 代表它对 SMEME/ETH 流动性池的拥有权。
+        LP Token 就像一个收据或证书，它代表着您在 SMEME/ETH 池子里所拥有的资产（ETH 和 SMEME）的份额。它本身不是 ETH
             
 
 
@@ -561,8 +585,8 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
         // 交换代币为ETH
         /*
-        在 Solidity 和以太坊虚拟机（EVM）中，原生代币（$ETH$）和 $ERC-20$ 代币的存储和查询方式是完全不同的
-        原生代币（$ETH$）的余额是存储在 EVM 状态 中的，可以直接通过地址查询：
+        在 Solidity 和以太坊虚拟机（EVM）中，原生代币（ETH）和 ERC-20 代币的存储和查询方式是完全不同的
+        原生代币（ETH）的余额是存储在 EVM 状态 中的，可以直接通过地址查询：
         ERC-20 代币（例如 SMEME）的余额是存储在代币合约的 内部存储映射 中的，必须通过调用代币合约的 balanceOf() 函数来查询
         */
         uint256 initialETHBalance = address(this).balance;
@@ -591,7 +615,17 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     /**
      * @dev 交换代币为ETH
      */
+    /*
+        业务步骤：谁在调用？ 
+        1、ShibaMemeCoin 合约调用它自己，将累积的税费代币 (swapTokens) 卖出。
+        2、发生什么？ swapTokens 数量的 $SMEME$ 代币从合约地址转给 Uniswap Router。
+        3、税费收取： $SMEME$ 合约会收取转账税（因为这是合约地址到 Router 的转账，而不是标准的买入/卖出，但通常也需要交费）。
+        4、交换执行： Uniswap Router 基于实际收到的 $SMEME$ 代币，从流动性池中取出相应的 $ETH$。
+        5、ETH 接收： $ETH$ 被发送回 $SMEME$ 合约地址 (address(this))。
+        6、后续： $SMEME$ 合约现在有了 $ETH$，可以继续执行 _swapAndLiquify 的后续步骤：分配 $ETH$ 到营销钱包和添加到流动性池。
+    */
     function _swapTokensForEth(uint256 tokenAmount) private {
+        // [SMEME 地址, WETH 地址]
         address[] memory path = new address[](2);
         path[0] = address(this);
         path[1] = uniswapV2Router.WETH();
