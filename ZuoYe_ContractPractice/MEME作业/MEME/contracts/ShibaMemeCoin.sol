@@ -26,6 +26,7 @@ interface IUniswapV2Router02 {
     这个方法的目的是允许用户或合约：
     1、出售 精确数量的 ERC-20 代币（在本例中是 SMEME）。
     2、换取 另一种资产，最终目标是 ETH（或 WETH）。
+    这个函数会将兑换所得的 ETH 转移到调用该函数的智能合约地址（即您的 SMEME 代币合约地址）。
 
     部分名称,含义
     swapExactTokens,意味着 发送的代币数量 是精确指定的 (amountIn)。
@@ -41,7 +42,7 @@ interface IUniswapV2Router02 {
         SupportingFeeOnTransferTokens 解决了这个问题： 它告诉 Uniswap Router，它预期接收的数量（100）和实际收到的数量（92）是不同的。
         Router 会在内部调整逻辑，确保交易基于实际收到的数量来执行，从而成功完成代币交换。
 
-    swapExactTokensForETHSupportingFeeOnTransferTokens 方法只是接收已经被扣除税费的代币。
+    这个方法只是接收已经被扣除税费的代币。
 
     */
     function swapExactTokensForETHSupportingFeeOnTransferTokens(
@@ -51,6 +52,7 @@ interface IUniswapV2Router02 {
         address to, // ETH 接收地址 (合约地址本身)
         uint deadline // 交易截止时间
     ) external;
+
     function addLiquidityETH(
         address token,
         uint amountTokenDesired,
@@ -606,7 +608,6 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     /*
     
     核心目的之一 就是将一部分累积的 SMEME 代币转换（Swap）成 ETH，以用于后续的流动性添加和营销费用分配
-
         swapAndLiquify 函数是分配代币的逻辑核心。
         它会根据 taxRates 中设定的比例（liquidityFee、marketingFee 和 burnFee）来分割这笔 contractTokenBalance
      */
