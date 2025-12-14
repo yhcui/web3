@@ -726,7 +726,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
-        // $ShibaMemeCoin$ 合约通过在交易路径中指定 $WETH$ 地址，来确保其与路由器的 $ETH$ 功能顺利集成
+        // ShibaMemeCoin 合约通过在交易路径中指定 WETH 地址，来确保其与路由器的 ETH 功能顺利集成
         uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount,
             0,
