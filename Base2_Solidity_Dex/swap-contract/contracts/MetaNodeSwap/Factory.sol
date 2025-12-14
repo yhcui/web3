@@ -5,6 +5,8 @@ import "./interfaces/IFactory.sol";
 import "./Pool.sol";
 
 contract Factory is IFactory {
+
+    // token0->token1-> pool list
     mapping(address => mapping(address => address[])) public pools;
 
     Parameters public override parameters;
@@ -58,7 +60,7 @@ contract Factory is IFactory {
          它指出了 CLMM（集中流动性做市商）协议与传统 AMM 协议（如 Uniswap V2）之间的核心区别。
          在 Uniswap V2 或相似的传统 AMM 中，一个代币对 TokenA /TokenB 只能对应一个流动性池，因为它们都使用相同的恒定乘积公式 x * y = k，且费率通常固定（如 0.3%）。
          但在 CLMM 模型中，一个 Token对可以有多个 Pool。原因如下：
-         1. 费率（fee）是多样的$\text{CLMM}$ 协议（如 Uniswap V3）允许为同一个代币对提供不同费率的流动性池。
+         1. 费率（fee）是多样的CLMM 协议（如 Uniswap V3）允许为同一个代币对提供不同费率的流动性池。
          2. Tick边界（tickLower 和 tickUpper）是 Pool 的配置
          */
         // check if the pool already exists

@@ -93,6 +93,7 @@ contract Pool is IPool {
         // Factory 创建 Pool 时会通 new Pool{salt: salt}() 的方式创建 Pool 合约，通过 salt 指定 Pool 的地址，这样其他地方也可以推算出 Pool 的地址
         // 参数通过读取 Factory 合约的 parameters 获取
         // 不通过构造函数传入，因为 CREATE2 会根据 initcode 计算出新地址（new_address = hash(0xFF, sender, salt, bytecode)），带上参数就不能计算出稳定的地址了
+        // 参数就是通过后面的bytecode传入的。
         (factory, token0, token1, tickLower, tickUpper, fee) = IFactory(
             msg.sender
         ).parameters();
@@ -140,7 +141,7 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
         // 通过新增的流动性计算 amount0 和 amount1
         // 参考 UniswapV3 的代码
 
-    // 计算在 tickLower 和tickUpper区间内，当前的 sqrtPriceX96 下，增加或减少liquidityDelta需要多少 Token0 和 Token1
+        // 计算在 tickLower 和tickUpper区间内，当前的 sqrtPriceX96 下，增加或减少liquidityDelta需要多少 Token0 和 Token1
         amount0 = SqrtPriceMath.getAmount0Delta(
             sqrtPriceX96,
             TickMath.getSqrtPriceAtTick(tickUpper),
@@ -195,6 +196,7 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
     function balance0() private view returns (uint256) {
         // token0.staticcall  这是函数的核心。它对token0 地址发起一个 外部调用
         // staticcall 的优势： 它比普通的 call 或 delegatecall 更安全、通常也更省 Gas。它强制执行 只读 调用，确保被调用的外部合约（即 Token0合约）不能修改任何状态变量。
+        // staticcall 的主要缺点： 它不能修改状态变量,只能调用pure或view的方法。因此，它不能用于修改状态变量的函数。优点节省GAS
         (bool success, bytes memory data) = token0.staticcall(
             abi.encodeWithSelector(IERC20.balanceOf.selector, address(this))
         );
@@ -216,14 +218,15 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
 
     
     /*
+    添加流动性或铸造流动性
     mint 函数是 Pool合约中用于 增加流动性（Minting Liquidity） 的核心入口。
     它的作用是让流动性提供者（LP，通常是通过PositionManager合约间接进行）在一个Pool预设的 Pool 和 tickUpper边界内，注入相应数量的 Token0 和 Token1
     mint 函数负责：计算所需本金 -> 更新 LP 头寸状态 -> 接收本金代币 -> 提高 Pool 的总流动性。
     */
     function mint(
-        address recipient,
-        uint128 amount,
-        bytes calldata data
+        address recipient,// NFT接收者
+        uint128 amount, //流动性
+        bytes calldata data // 回调时需要的参数
     ) external override returns (uint256 amount0, uint256 amount1) {
         require(amount > 0, "Mint amount must be greater than 0");
         // 基于 amount 计算出当前需要多少 amount0 和 amount1
@@ -240,7 +243,7 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
         uint256 balance1Before;
         if (amount0 > 0) balance0Before = balance0();
         if (amount1 > 0) balance1Before = balance1();
-        // 回调 mintCallback
+        // 回调 mintCallback.--这里进行了转账，将支持币从用户账户转移到Pool合约中，包括aomunt0和amount1
         IMintCallback(msg.sender).mintCallback(amount0, amount1, data);
 
         if (amount0 > 0)
@@ -259,6 +262,7 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
      1、手续费收入： Pool中发生的swap交易。每次调用 mint 或 burn时。
      2、已移除的本金： 调用burn移除流动性L。调用burn时。
      此处不影响流动性。
+     一般情况下，全部拿走。
      */
     function collect(
         address recipient,
@@ -277,6 +281,7 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
             : amount1Requested;
 
         if (amount0 > 0) {
+            // 先改状态再转账 -避免重入攻击
             position.tokensOwed0 -= amount0;
             TransferHelper.safeTransfer(token0, recipient, amount0);
         }
@@ -300,8 +305,10 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
     function burn(
         uint128 amount // liquidityDelta
     ) external override returns (uint256 amount0, uint256 amount1) {
+        // 此处不需要token0,token1，因为是在pool中，pool中已经存储了token0和token1
         require(amount > 0, "Burn amount must be greater than 0");
         require(
+            // positions也是pool中的，所以直接用msg.sender就行获取的就是当前token0和token1
             amount <= positions[msg.sender].liquidity,
             "Burn amount exceeds liquidity"
         );
@@ -311,7 +318,7 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
         (int256 amount0Int, int256 amount1Int) = _modifyPosition(
             ModifyPositionParams({
                 owner: msg.sender,
-                liquidityDelta: -int128(amount) // liquidityDelta 被转换为负数（-int128(amount)）传入 _modifyPosition
+                liquidityDelta: -int128(amount) // 因为是销毁，所以liquidityDelta 被转换为负数（-int128(amount)）传入 _modifyPosition
             })
         );
         // 获取燃烧后的 amount0 和 amount1
@@ -356,10 +363,10 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
      **/
     function swap(
         address recipient,
-        bool zeroForOne,
-        int256 amountSpecified, // 交易数量（正数代表输入量，负数代表输出量）。
-        uint160 sqrtPriceLimitX96,
-        bytes calldata data
+        bool zeroForOne, // 交换方向，true代表 token0 换到 token1，false代表 token1 换到  token0
+        int256 amountSpecified, // 想要换的数量（正数代表输入量，负数代表输出量）。
+        uint160 sqrtPriceLimitX96, //不能超出的价格限制
+        bytes calldata data //回调data
     ) external override returns (int256 amount0, int256 amount1) {
         // 确保交易量不为零
         require(amountSpecified != 0, "AS");
@@ -384,12 +391,12 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
 
         // 初始化一个内存结构体，用于存储交易过程中的动态状态（例如剩余交易量、累计的输入/输出量、当前价格、累计费用）。
         SwapState memory state = SwapState({
-            amountSpecifiedRemaining: amountSpecified,
-            amountCalculated: 0,
-            sqrtPriceX96: sqrtPriceX96,
-            feeGrowthGlobalX128: zeroForOne
+            amountSpecifiedRemaining: amountSpecified, // 需要交换的剩余数量，刚进来没有进行交易，所以为 amountSpecified
+            amountCalculated: 0, // 已经交换的数量，刚进来没有进行交易，所以为0
+            sqrtPriceX96: sqrtPriceX96, // 当前价格，刚进来没有进行交易，所以为sqrtPriceX96
+            feeGrowthGlobalX128: zeroForOne 
                 ? feeGrowthGlobal0X128
-                : feeGrowthGlobal1X128,
+                : feeGrowthGlobal1X128, // token0换token1，收token0的手续费，反之亦然。
             amountIn: 0,
             amountOut: 0,
             feeAmount: 0
@@ -400,13 +407,13 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
         uint160 sqrtPriceX96Upper = TickMath.getSqrtPriceAtTick(tickUpper);
 
         // 计算用户交易价格的限制，如果是 zeroForOne 是 true，说明用户会换入 token0，会压低 token0 的价格（也就是池子的价格），所以要限制最低价格不能超过 sqrtPriceX96Lower
-        // 如果是 token0 -> token1，价格会下跌，最低不能低于 tickLower
-        // 如果是 token1 -> token0，价格会上涨，最高不能高于 tickUpper
+        // 如果是 token0 换 token1，价格会下跌，最低不能低于 tickLower
+        // 如果是 token1 换 token0，价格会上涨，最高不能高于 tickUpper
         uint160 sqrtPriceX96PoolLimit = zeroForOne
             ? sqrtPriceX96Lower
             : sqrtPriceX96Upper;
 
-        // 计算交易的具体数值
+        // 计算交易的具体数值 -- 不需要纠结这个，只要知道用法即可。
         // 这是 Uniswap V3 模型的核心数学运算。它根据当前的流动性 (liquidity) 和剩余的交易量 (amountSpecified)，计算出：
         // 交易后的新价格 (state.sqrtPriceX96)。
         // 实际投入的代币量 (state.amountIn)。
@@ -453,18 +460,23 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
 
         // 计算交易后用户手里的 token0 和 token1 的数量
         if (exactInput) {
+            // 对token0的数量进行交换 
             state.amountSpecifiedRemaining -= (state.amountIn + state.feeAmount)
                 .toInt256();
+            // amountCalculated，换了多少token1,state.amountOut是一个负数。所以是减
             state.amountCalculated = state.amountCalculated.sub(
                 state.amountOut.toInt256()
             );
         } else {
+            // 对token1的数量进行交换 state.amountOut应该是负数。即，填的是token1的数量，即需要拿多少token1
             state.amountSpecifiedRemaining += state.amountOut.toInt256();
+            // 换了多少token0,state.amountIn是一个正数。所以是加
             state.amountCalculated = state.amountCalculated.add(
                 (state.amountIn + state.feeAmount).toInt256()
             );
         }
         // 根据交易方向 (zeroForOne) 和交易类型 (exactInput) 确定最终返回给 Router 的 amount0 和 amount1 值
+        // 即消耗了多少 token0 ,换出了多少token1
         (amount0, amount1) = zeroForOne == exactInput
             ? (
                 amountSpecified - state.amountSpecifiedRemaining,
@@ -476,6 +488,7 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
             );
 
         if (zeroForOne) {
+            // 转token0,换token1
             // callback 中需要给 Pool 转入 token
             uint256 balance0Before = balance0();
             // 回调 Router (swapCallback)： Pool 调用 Router（msg.sender）的 swapCallback，要求 Router 将tokenIn转移到 Pool 中
@@ -492,6 +505,7 @@ params.liquidityDelta 它决定了操作方向：正值： 增加流动性 (Mint
                     uint256(-amount1)
                 );
         } else {
+            // 转token1,换token0
             // callback 中需要给 Pool 转入 token
             uint256 balance1Before = balance1();
             ISwapCallback(msg.sender).swapCallback(amount0, amount1, data);

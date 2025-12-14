@@ -35,6 +35,7 @@ contract PoolManager is Factory, IPoolManager {
     // 此处只是token0和token1的交易对
     Pair[] public pairs;
 
+    //为什么有这个方法？因为默认暴露的需要根据index来获取，不能获取整个数据，所以需要这个方法
     function getPairs() external view override returns (Pair[] memory) {
         return pairs;
     }
@@ -87,6 +88,7 @@ contract PoolManager is Factory, IPoolManager {
             "token0 must be less than token1"
         );
 
+        //  在这里放入了Factory中的pools中
         poolAddress = this.createPool(
             params.token0,
             params.token1,

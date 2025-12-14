@@ -102,13 +102,13 @@ contract PositionManager is IPositionManager, ERC721 {
         uint160 sqrtRatioAX96 = TickMath.getSqrtPriceAtTick(pool.tickLower());
         uint160 sqrtRatioBX96 = TickMath.getSqrtPriceAtTick(pool.tickUpper());
 
-        // TODO CUIYUHUI
+        // 计算流动性
         liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96,
-            sqrtRatioAX96,
-            sqrtRatioBX96,
-            params.amount0Desired,
-            params.amount1Desired
+            sqrtPriceX96, //当前价格
+            sqrtRatioAX96, // token0下限价格
+            sqrtRatioBX96, // token1上限价格
+            params.amount0Desired, //存放数量
+            params.amount1Desired //存放数量
         );
 
         // data 是 mint 后回调 PositionManager 会额外带的数据
@@ -133,6 +133,7 @@ contract PositionManager is IPositionManager, ERC721 {
 
         ) = pool.getPosition(address(this));
 
+        //更新头寸信息
         positions[positionId] = PositionInfo({
             id: positionId,
             owner: params.recipient,
@@ -160,8 +161,9 @@ contract PositionManager is IPositionManager, ERC721 {
     // 在这个特定的模型中，burn 负责移除流动性，而资产（本金和手续费）会被累加到头寸的应得余额中，等待单独的 collect 调用来提取。
     // 在这个模型中，burn 只是一个 记账和状态变更 的操作，它负责将流动性从 Pool 中移除，并将本金和收益结算到 tokensOwed 字段。
     // 它并不负责实际的 Token 转移。 Token 的实际提取（从Pool 转到用户地址）需要通过 collect 函数来完成。
+    // 全部移除
     function burn(
-        uint256 positionId
+        uint256 positionId // NFT 的 ID,这里不销毁NFT ID, 在collect中实现
     )
         external
         override

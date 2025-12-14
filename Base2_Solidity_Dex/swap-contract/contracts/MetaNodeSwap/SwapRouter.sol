@@ -47,6 +47,19 @@ contract SwapRouter is ISwapRouter {
         bytes calldata data // 编码给 swapCallback 的回调数据（包含支付方等信息）
     ) external returns (int256 amount0, int256 amount1) {
         // 交易结束后 Token0和 Token1的净变化量（遵循正流入/负流出约定）。
+        /*
+            try <外部函数调用> [returns (<返回变量列表>)] {
+                // 成功时的代码块
+            } catch (<错误类型> <变量>) {
+                // 失败时的代码块
+            }
+            (int256 _amount0, int256 _amount1)： 
+            括号内的部分定义了局部变量（_amount0, _amount1），用于接收外部函数pool.swap(...) 成功返回的值。
+            这些变量只在这个 returns 代码块内部有效。
+
+            { return (_amount0, _amount1); }： 这是一个普通的代码块，它在外部调用成功时执行。
+            在这个例子中，它只是将接收到的 swap 结果作为当前函数的返回值。
+        */
         try
             pool.swap(
                 recipient,
@@ -55,9 +68,11 @@ contract SwapRouter is ISwapRouter {
                 sqrtPriceLimitX96,
                 data
             )
+        // 这是一个匿名块，用于接收外部函数（例如 swap）成功执行后返回的值（_amount0 和 _amount1）。    
         returns (int256 _amount0, int256 _amount1) {
             return (_amount0, _amount1);
         } catch (bytes memory reason) {
+            //捕获异常，解析两个参数。
             return parseRevertReason(reason);
         }
     }
@@ -67,6 +82,7 @@ contract SwapRouter is ISwapRouter {
      * 用户指定要投入的 amountIn，Router 负责将这笔资金按 indexPath 确定的路径，分配到各个流动性池进行交换，并返回最终获得的 amountOut
      * @param params 
      */
+    // input 指定的是token0的数量
     function exactInput(
         ExactInputParams calldata params
     ) external payable override returns (uint256 amountOut) {
@@ -268,10 +284,12 @@ contract SwapRouter is ISwapRouter {
         // payer 是 address(0)，这是一个用于预估 token 的请求（quoteExactInput or quoteExactOutput）
         // 参考代码 https://github.com/Uniswap/v3-periphery/blob/main/contracts/lens/Quoter.sol#L38
         if (payer == address(0)) {
+            // 如果地址为 address(0)，则表示是预估 token 的请求，直接抛出错误，并返回两个参数
             assembly {
                 let ptr := mload(0x40)
-                mstore(ptr, amount0Delta)
-                mstore(add(ptr, 0x20), amount1Delta)
+                mstore(ptr, amount0Delta) // amount0的数量
+                mstore(add(ptr, 0x20), amount1Delta) // amount1的数量
+                // 此时返回两个参数
                 revert(ptr, 64)
             }
         }
