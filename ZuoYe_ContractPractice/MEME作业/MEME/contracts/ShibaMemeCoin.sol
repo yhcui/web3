@@ -491,8 +491,12 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
     /**
      * @dev 紧急提取代币
+     *  提取合约地址中意外或错误发送的其他 ERC-20 代币。
      */
     function emergencyWithdrawTokens(address tokenAddress) external onlyOwner {
+
+        // 合约持有的本币通常是作为税费/流动性/销毁预留的资金。
+        // 允许 owner 用 emergencyWithdrawTokens(address(this)) 直接提走就能把这些留作的代币一键转走，破坏经济逻辑并造成资金被盗
         require(tokenAddress != address(this), "Cannot withdraw own tokens");
 
         IERC20 token = IERC20(tokenAddress);
@@ -590,12 +594,13 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
         if (automatedMarketMakerPairs[from]) {
             // 交易时间间隔限制：当 target 是 AMM（即发起者在 AMM 卖出）时，检查卖方的时间间隔
+            // -- 说明用户买AMM，对用户来讲是买入。
             taxRate = taxRates.buyTax;
         } else if (automatedMarketMakerPairs[to]) {
-            // 卖出交易
+            // 卖出交易 -- 说明用户卖给AMM，对用户来讲是卖出。
             taxRate = taxRates.sellTax;
         } else {
-            // 转账交易
+            // 转账交易 -- 都不是，就是转账
             taxRate = taxRates.transferTax;
         }
 
@@ -616,7 +621,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         uint256 totalFees = taxRates.liquidityFee.add(taxRates.marketingFee).add(taxRates.burnFee);
         if (totalFees == 0) return;
 
-        //流动性
+        //流动性 除以2的原因：流动性准备的份额要一分为二：一半以代币形式直接作为要加入池子的 token，另一半需要先卖成 ETH 再作为 ETH 部分配对
         uint256 liquidityTokens = contractTokenBalance.mul(taxRates.liquidityFee).div(totalFees).div(2);
 
         // 营销 -- 其实最终也是转为ETH了
@@ -650,6 +655,13 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         uint256 newETHBalance = address(this).balance.sub(initialETHBalance);
 
         // 分配ETH
+        /*
+        newETHBalance 是把 swapTokens 卖成的全部 ETH（不包含已销毁的 burnTokens）。
+        totalFees 是 liquidityFee + marketingFee + burnFee，但卖出时并没有把 burnFee 对应的代币卖成 ETH（burnTokens 已经被销毁），所以要把 ETH 在非销毁部分中按比例分配 —— 因此用 div(totalFees.sub(taxRates.burnFee)) 来把 ETH 按“可交换的费用份额”（即 liquidity + marketing）归一化。
+        mul(taxRates.liquidityFee).div(... ) 把归一化后的 ETH 中分出属于流动性（liquidity）的那一部分。
+        最后再 div(2)：因为流动性份额要“二分”为代币半边和 ETH 半边，合约在前面已经保留了流动性对应的一半代币（liquidityTokens），这里只需要那一半流动性对应的 ETH 来配对，所以要除以 2。
+        */
+
         uint256 ethForLiquidity = newETHBalance.mul(taxRates.liquidityFee).div(totalFees.sub(taxRates.burnFee)).div(2);
         uint256 ethForMarketing = newETHBalance.sub(ethForLiquidity);
 
@@ -744,12 +756,16 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
         // 这行代码在内部触发了 super._transfer(address(this), address(uniswapV2Router), tokenAmount)
+        /*
+        tokenAmount和ethAmount会转到Uniswap Pair（流动性池）的合约
+        多余的 ETH 会被 Router 退回到合约；多余未被使用的代币不会被 Router 取走，会留在合约地址（address(this)）
+        */
         uniswapV2Router.addLiquidityETH{value: ethAmount}(
             address(this),
             tokenAmount,
             0,
             0,
-            liquidityWallet,
+            liquidityWallet, // 由器会铸造对应的 LP tokens（代表这笔流动性的份额）并把它们发送到 liquidityWallet（函数的 to 参数）
             block.timestamp
         );
     }
@@ -767,6 +783,11 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     ) {
         totalSupply_ = totalSupply();
         circulatingSupply = totalSupply_.sub(balanceOf(deadAddress));
+        
+        /* 
+        balanceOf(deadAddress) 返回的数量是极其准确的，因为它查询的是“当前代币合约账本”中记录的黑洞地址余额，而不是黑洞地址在整个区块链上的“总资产”。
+        在以太坊上，每个代币合约都是一个独立的记账单位。
+        */
         burnedTokens = balanceOf(deadAddress);
         contractBalance = balanceOf(address(this));
         tradingEnabled_ = tradingEnabled;
