@@ -216,7 +216,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     TradingLimits public tradingLimits;
 
     // 地址配置
-    // marketingWallet: 接收营销费用的地址
+    marketingWallet: 接收营销费用的地址
     
     // deadAddress: 销毁代币的地址（通常使用烧毁地址）
     address public marketingWallet;
