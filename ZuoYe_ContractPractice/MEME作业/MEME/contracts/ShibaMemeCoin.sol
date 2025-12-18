@@ -217,9 +217,13 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
     // 地址配置
     // marketingWallet: 接收营销费用的地址
-    // liquidityWallet: 添加流动性时接收LP或代币的地址（这里作为流动性接收者）
+    
     // deadAddress: 销毁代币的地址（通常使用烧毁地址）
     address public marketingWallet;
+
+    // liquidityWallet: 添加流动性时接收LP或代币的地址（这里作为流动性接收者）
+    // 它是管理地址（通常是项目方控制）。它不参与交易，而是用来接收凭证。 存放的是 LP Token（流动性收益凭证）。
+    // 有些合约中，liquidityWallet 不仅仅接收 LP 凭证，还会直接接收一部分税费。
     address public liquidityWallet;
 
     /*
