@@ -193,6 +193,8 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
 
 
     */
+
+   
     struct TaxRates {
         uint256 buyTax;          // 买入税费
         uint256 sellTax;         // 卖出税费
@@ -484,7 +486,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev 紧急提取ETH
+     * @dev 紧急提取ETHx
      */
     function emergencyWithdrawETH() external onlyOwner {
         uint256 ethBalance = address(this).balance;
@@ -538,6 +540,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
             !isExcludedFromFees[to] &&
             balanceOf(address(this)) >= swapThreshold // balanceOf(address(this)) 的钱不计算本次转账收取的费用。
         ) {
+            // 将inSwap 设为true后，等该方法执行完毕，inSwap 就会自动被设置为false。所以不存在takeFee计算错误情况
             _swapAndLiquify(swapThreshold);
         }
 
@@ -571,6 +574,7 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         // 最大持有量限制
         if (!isExcludedFromLimits[to]) {
             require(
+                // 此时还没有真正执行转账，所以balanceOf(to) 获取的是上次的余额。
                 balanceOf(to).add(amount) <= tradingLimits.maxWalletAmount,
                 "Exceeds max wallet amount"
             );
@@ -637,6 +641,11 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
      */
     function _calculateFees(address from, address to, uint256 amount) private view returns (uint256) {
         uint256 taxRate = 0;
+        // 在智能合约（代币合约）的逻辑中，所有的“买”和“卖”都是以你正在编写的这个代币（Token）为中心的。
+
+        // 术语,        代币 (Token) 流向,  ETH/BNB 流向,   代码逻辑判断,                  说明
+        // Buy (买入),  池子 → 用户,        用户 → 池子,    ammPairs[from] == true        用户购买代币，需要从池子里转代币给用户。
+        // Sell (卖出), 用户 → 池子,        池子 → 用户,    ammPairs[to] == true          用户购买代币，需要用户将代币转到池子里。
 
         if (automatedMarketMakerPairs[from]) {
             // 交易时间间隔限制：当 target 是 AMM（即发起者在 AMM 卖出）时，检查卖方的时间间隔
@@ -697,7 +706,28 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         */
         uint256 initialETHBalance = address(this).balance;
         // 交换代币：从合约地址转账给 Uniswap Router
+        /* 
+        在以太坊（EVM）中，代码是顺序执行的。 当 _swapTokensForEth 执行完毕时，底层的 balance 映射表已经在这个交易的上下文中被修改了。因此，下一行代码 address(this).balance 读取到的是更新后的数据。
+
+        当你直接给合约转账（触发 receive() 或 fallback() 方法）时，你在方法第一行获取的 address(this).balance 已经包含了你刚刚转进去的那笔钱。
+
+        在 payable 方法的第一行获取 address(this).balance，得到的是已经包含了本次转入金额（msg.value）之后的总余额
+
+        区块链特性
+        原子性 vs. 实时性
+        原子性 (Atomic)	整个方法要么全部生效，要么彻底撤销。
+        实时性 (Synchronous)	每一行代码执行完，状态立即更新。
+
+        智能合约在执行层面是“完全串行”的，没有传统软件开发中的“多线程并发”。 但在逻辑层面，存在一种特殊的“并发挑战”，我们称之为 “竞争条件”（Race Conditions）。
+        为什么说没有“并发执行”？
+            在以太坊（EVM）中，所有的交易都是排队执行的。
+            单线程模型： 矿工（或验证者）在一个区块内按顺序处理交易。交易 A 跑完，才会跑交易 B。
+            状态锁定： 在交易 A 执行期间，整个区块链的状态（所有合约的余额、变量）对交易 A 来说是“独占”的。
+
+         “竞争条件”（Race Conditions）： 需要 inSwap 这种锁
+        */
         _swapTokensForEth(swapTokens);
+        // 两次余额不同
         uint256 newETHBalance = address(this).balance.sub(initialETHBalance);
 
         // 分配ETH
