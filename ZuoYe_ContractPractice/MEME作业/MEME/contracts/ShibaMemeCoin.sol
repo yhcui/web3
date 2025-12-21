@@ -320,7 +320,8 @@ contract ShibaMemeCoin is ERC20, Ownable, ReentrancyGuard {
         // 初始化钱包地址（部署时由部署者传入）
         marketingWallet = _marketingWallet;
         liquidityWallet = _liquidityWallet;
-
+        
+        console.log("Token Constructor: Router is", routerAddress);
         // 初始化 Uniswap 路由与交易对（创建本代币/WETH 交易对）
         uniswapV2Router = IUniswapV2Router02(_router);
         uniswapV2Pair = IUniswapV2Factory(uniswapV2Router.factory())

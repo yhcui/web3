@@ -2,7 +2,11 @@ This is a [RainbowKit](https://rainbowkit.com) + [wagmi](https://wagmi.sh) + [Ne
 
 ## Getting Started
 
-First, run the development server:
+First, run the development server:   
+若未安装依赖包，请先执行以下命令安装依赖包
+`
+npm install
+`
 
 ```bash
 npm run dev
